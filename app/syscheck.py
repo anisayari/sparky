@@ -17,6 +17,10 @@ BANDWIDTH = [("5090", 1500), ("5080", 800), ("5070 ti", 750), ("5070", 560), ("5
              ("2070", 380), ("2060", 280), ("a6000", 640), ("a5000", 640), ("a4000", 380),
              ("spark", 230), ("gb10", 230)]
 UNIFIED_HINTS = ("spark", "gb10")
+# Apple Silicon (Metal): ~85 % of the chip's nominal bandwidth. Longest names first ("m4 pro" before "m4").
+APPLE_BW = [("m1 ultra", 680), ("m1 max", 340), ("m1 pro", 170), ("m1", 58), ("m2 ultra", 680), ("m2 max", 340), ("m2 pro", 170),
+            ("m2", 85), ("m3 ultra", 700), ("m3 max", 340), ("m3 pro", 130), ("m3", 85), ("m4 max", 460), ("m4 pro", 230),
+            ("m4", 100), ("m5", 130)]
 
 
 def _run(cmd, timeout=10):
@@ -30,11 +34,25 @@ def _ps(expr):
     return _run(["powershell", "-NoProfile", "-Command", expr]).strip() if os.name == "nt" else ""
 
 
+def _sysctl(key):
+    return _run(["sysctl", "-n", key]).strip() if sys.platform == "darwin" else ""
+
+
+def apple_gpu(ram):
+    """Apple Silicon GPU (Metal): it shares the RAM, up to the wired limit macOS gives it
+    (2/3 of the RAM up to 36 GB, 3/4 above, unless iogpu.wired_limit_mb was raised)."""
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return None
+    limit = _sysctl("iogpu.wired_limit_mb")
+    gb = int(limit) / 1024 if limit.isdigit() and int(limit) > 0 else ram * (2 / 3 if ram <= 36 else 3 / 4)
+    return {"name": _sysctl("machdep.cpu.brand_string") or "Apple Silicon", "vram_gb": round(gb, 1), "driver": "Metal", "vendor": "apple"}
+
+
 def detect():
     import psutil
     ram = psutil.virtual_memory().total / 2**30
-    cpu = _ps("(Get-CimInstance Win32_Processor | Select -First 1).Name") or platform.processor() or "?"
-    gpus = []
+    cpu = _ps("(Get-CimInstance Win32_Processor | Select -First 1).Name") or _sysctl("machdep.cpu.brand_string") or platform.processor() or "?"
+    gpus = [g for g in [apple_gpu(ram)] if g]
     out = _run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
     for line in out.splitlines():
         p = [x.strip() for x in line.split(",")]
@@ -53,18 +71,21 @@ def detect():
 
 def assess(hw):
     """Memory budget for models and estimated speed."""
-    g = next((x for x in hw["gpus"] if x["vendor"] == "nvidia"), None)
+    g = next((x for x in hw["gpus"] if x["vendor"] in ("nvidia", "apple")), None)
     name = (g or {}).get("name", "").lower()
-    unified = bool(g) and (any(h in name for h in UNIFIED_HINTS) or abs(g["vram_gb"] - hw["ram_gb"]) < 0.12 * hw["ram_gb"])
-    if g and unified:
+    apple = bool(g) and g["vendor"] == "apple"
+    unified = bool(g) and (apple or any(h in name for h in UNIFIED_HINTS) or abs(g["vram_gb"] - hw["ram_gb"]) < 0.12 * hw["ram_gb"])
+    if apple:
+        mode, mem = "unified", g["vram_gb"] - 1.0      # vram_gb is already the share macOS lets the GPU use
+    elif g and unified:
         mode, mem = "unified", g["vram_gb"] - 2.0      # memory shared by CPU + GPU, keep enough to run Windows
     elif g:
         mode, mem = "gpu", g["vram_gb"] - 1.0
     else:
         mode, mem = "cpu", max(0.0, hw["ram_gb"] - 8.0)
-    bw = next((b for k, b in BANDWIDTH if k in name), None) if g else None
+    bw = next((b for k, b in (APPLE_BW if apple else BANDWIDTH) if k in name), None) if g else None
     if bw is None:
-        bw = (max(150, g["vram_gb"] * 25) if g else 40)
+        bw = 100 if apple else (max(150, g["vram_gb"] * 25) if g else 40)
     image_gb = 7.5                                     # FLUX.2 Klein 4B (or SDXL) during a generation
     if mode == "cpu" or mem < 6:
         tier, label = 1, "Limitée"
@@ -75,7 +96,9 @@ def assess(hw):
     else:
         tier, label = 4, "Excellente"
     return {"mode": mode, "gpu": g["name"] if g else None, "model_mem_gb": round(mem, 1), "bandwidth": bw,
-            "image_gb": image_gb, "tier": tier, "tier_label": label, "images": mode != "cpu" and mem >= 5.5}
+            # images on a Mac: the catalog's fp8 / int8 files are made for NVIDIA GPUs (ComfyUI on Metal comes later)
+            "image_gb": image_gb, "tier": tier, "tier_label": label, "images": mode != "cpu" and mem >= 5.5 and not apple,
+            "apple": apple}
 
 
 def recommend(sysinfo):
@@ -98,6 +121,8 @@ def recommend(sysinfo):
         fits = [m for m in imgs if catalog.indicators(m, sysinfo=sysinfo)["fit"] >= 1]
         pick = next((m for m in fits if m.get("engine") == "klein"), None) or (max(fits, key=lambda m: m["quality"]) if fits else None)
         out["image"] = pick["id"] if pick else None
+    elif a.get("apple"):
+        notes.append("Mac : la génération d'images n'est pas encore prise en charge sur macOS.")
     else:
         notes.append("Pas de GPU NVIDIA compatible : la génération d'images serait très lente, elle n'est pas recommandée.")
     out["voice"] = "whisper-turbo" if a["mode"] != "cpu" else "whisper-base"  # voice dictation
@@ -131,7 +156,8 @@ def current():
 
 
 TIER_EN = {"Limitée": "Limited", "Correcte": "Fair", "Bonne": "Good", "Excellente": "Excellent"}
-NOTES_EN = [(r"^Pas de GPU NVIDIA compatible.*", "No compatible NVIDIA GPU: image generation would be very slow, so it isn't recommended."),
+NOTES_EN = [(r"^Mac : la génération d'images.*", "Mac: image generation isn't supported on macOS yet."),
+            (r"^Pas de GPU NVIDIA compatible.*", "No compatible NVIDIA GPU: image generation would be very slow, so it isn't recommended."),
             (r"^Sans GPU NVIDIA.*", "Without an NVIDIA GPU the assistant runs on the processor: pick a small model."),
             (r"^Espace disque faible : (\d+) Go libres pour ~(\d+) Go.*", r"Low disk space: \1 GB free for ~\2 GB of recommended models.")]
 

@@ -171,6 +171,22 @@ Next times, double-click the shortcut (or `start.bat`). To stop everything: `sto
 
 Installer options: `-Lang en|fr`, `-Dir <folder>`, `-Yes` (no questions), `-Models` (also download the recommended models from the terminal), `-NoLaunch`. For the one-line install, use the environment variables `SPARKY_LANG`, `SPARKY_DIR`, `SPARKY_YES`, `SPARKY_MODELS`, `SPARKY_NOLAUNCH`.
 
+## 🍎 Install (macOS on Apple Silicon, preview)
+
+**One line**, in Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anisayari/sparky/main/install.sh | bash
+```
+
+**Or** from the project folder: `./install.sh`. Same 7 steps as on Windows: Python 3.12 (found on the Mac, or via Homebrew), PyTorch (Apple GPU through Metal), ComfyUI, [llama.cpp](https://github.com/ggml-org/llama.cpp) for macOS (Metal), a portable Node.js, the system scan, and a **Sparky** app in `~/Applications` (Spotlight, Launchpad). Default folder: `~/Sparky`.
+
+Next times, open **Sparky** from Spotlight (or `./start.sh`). To stop everything: `./stop.sh`.
+
+What works on a Mac today: chat, vision, documents (RAG), web, code & projects, dictation and read-aloud, MCP, scheduled tasks, cloud models. **Not yet**: image and video generation, and computer mode (both still Windows only).
+
+Options: `--lang en|fr`, `--dir <folder>`, `--yes`, `--models`, `--no-launch` (or the same `SPARKY_*` environment variables as on Windows).
+
 ### 💻 Which machine?
 
 | Machine | Runs well |
@@ -178,6 +194,7 @@ Installer options: `-Lang en|fr`, `-Dir <folder>`, `-Yes` (no questions), `-Mode
 | NVIDIA GPU 24 GB+ or 32 GB+ unified memory | 27–35B assistants, Qwen-Image 2.1 |
 | NVIDIA GPU 12–16 GB | 9–20B assistants, FLUX.2 Klein |
 | NVIDIA GPU 6–8 GB | 4–9B assistants, FLUX.2 Klein (slower) |
+| Mac Apple Silicon 16–24 GB / 32 GB+ | 4–9B / 20–35B assistants on the GPU (Metal), no image generation yet |
 | No NVIDIA GPU | small assistants (4B) on the CPU, no image generation |
 
 The system scan picks automatically among these.

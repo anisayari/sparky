@@ -68,7 +68,7 @@ def test_zip_install_gets_the_install_command(tmp_path, monkeypatch):
     (tmp_path / "VERSION").write_text("1.0.0")
     monkeypatch.setitem(updater.state, "latest", "1.1.0")
     s = updater.status()
-    assert s["available"] and not s["git"] and not s["auto"] and "install.ps1" in s["command"]
+    assert s["available"] and not s["git"] and not s["auto"] and ("install.ps1" if os.name == "nt" else "install.sh") in s["command"]
 
 
 def test_offline_check_is_not_an_error(monkeypatch):

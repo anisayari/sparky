@@ -14,9 +14,9 @@ def _load(mid):
     import torch
     from transformers import pipeline
     m = catalog.BY_ID[mid]
-    gpu = torch.cuda.is_available()
+    dev = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"  # mps: Apple GPU
     _st["pipe"] = pipeline("automatic-speech-recognition", model=m["dir"],
-                           dtype=torch.float16 if gpu else torch.float32, device="cuda:0" if gpu else "cpu")
+                           dtype=torch.float32 if dev == "cpu" else torch.float16, device=dev)
     _st["id"] = mid
 
 
@@ -29,6 +29,8 @@ def _unload_when_idle():
                 try:
                     import torch
                     torch.cuda.empty_cache()
+                    if torch.backends.mps.is_available():
+                        torch.mps.empty_cache()
                 except Exception:
                     pass
 

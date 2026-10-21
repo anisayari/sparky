@@ -51,3 +51,43 @@ def test_low_disk_space_is_reported():
 def test_unified_memory_machines_keep_memory_for_windows():
     i = machine("NVIDIA GB10 Spark", 120, 128)
     assert i["assess"]["mode"] == "unified" and i["assess"]["model_mem_gb"] == 118
+
+
+def mac(chip, ram, gpu_gb=None):
+    gpus = [{"name": chip, "vram_gb": gpu_gb or ram * (2 / 3 if ram <= 36 else 3 / 4), "driver": "Metal", "vendor": "apple"}]
+    hw = {"os": "Darwin 24.6.0", "arch": "arm64", "cpu": chip, "cores": 12, "ram_gb": ram, "gpus": gpus, "disk_free_gb": 500}
+    info = {"hw": hw, "assess": syscheck.assess(hw)}
+    info["recommended"], info["notes"] = syscheck.recommend(info)
+    return info
+
+
+def test_apple_silicon_is_unified_memory_on_the_gpu():
+    i = mac("Apple M4 Pro", 24)
+    a = i["assess"]
+    assert a["mode"] == "unified" and a["apple"] and a["gpu"] == "Apple M4 Pro"
+    assert a["model_mem_gb"] == 15.0 and a["bandwidth"] == 230  # "m4 pro" matched before "m4"
+    assert i["recommended"]["voice"] == "whisper-turbo" and "llm" in i["recommended"]
+
+
+def test_apple_silicon_gets_no_image_model_yet():
+    i = mac("Apple M3 Max", 64)
+    assert not i["assess"]["images"] and "image" not in i["recommended"]
+    assert any(n.startswith("Mac :") for n in i["notes"]) and not any("NVIDIA" in n for n in i["notes"])
+    assert syscheck.note_en(i["notes"][0]).startswith("Mac: image generation")
+
+
+@pytest.mark.parametrize("chip,bw", [("Apple M1", 58), ("Apple M2 Ultra", 680), ("Apple M4", 100), ("Apple M9", 100)])
+def test_apple_bandwidth_by_chip(chip, bw):
+    assert mac(chip, 16)["assess"]["bandwidth"] == bw
+
+
+def test_apple_gpu_share_follows_the_wired_limit(monkeypatch):
+    monkeypatch.setattr(syscheck.sys, "platform", "darwin")
+    monkeypatch.setattr(syscheck.platform, "machine", lambda: "arm64")
+    vals = {"iogpu.wired_limit_mb": "0", "machdep.cpu.brand_string": "Apple M4 Pro"}
+    monkeypatch.setattr(syscheck, "_sysctl", lambda k: vals[k])
+    assert syscheck.apple_gpu(24)["vram_gb"] == 16.0 and syscheck.apple_gpu(64)["vram_gb"] == 48.0
+    vals["iogpu.wired_limit_mb"] = "20480"  # raised by the user (sudo sysctl iogpu.wired_limit_mb=20480)
+    assert syscheck.apple_gpu(24)["vram_gb"] == 20.0
+    monkeypatch.setattr(syscheck.platform, "machine", lambda: "x86_64")  # Intel Mac: no Metal acceleration here
+    assert syscheck.apple_gpu(24) is None

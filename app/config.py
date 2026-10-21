@@ -20,7 +20,7 @@ def _p(key, default):
 
 RUNTIME = _p("runtime_dir", os.path.join(ROOT, "runtime"))
 COMFY_DIR = _p("comfy_dir", os.path.join(RUNTIME, "ComfyUI"))
-LLAMA_SERVER = _p("llama_server", os.path.join(RUNTIME, "llama", "llama-server.exe"))
+LLAMA_SERVER = _p("llama_server", os.path.join(RUNTIME, "llama", "llama-server.exe" if os.name == "nt" else "llama-server"))
 LLM_DIR = _p("llm_dir", os.path.join(ROOT, "models", "llm"))
 MMPROJ_DIR = _p("mmproj_dir", os.path.join(ROOT, "models", "mmproj"))
 VOICE_DIR = _p("voice_dir", os.path.join(ROOT, "models", "voice"))
