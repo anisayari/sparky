@@ -19,6 +19,8 @@ def node_dir():
     local = os.path.join(config.RUNTIME, "node")
     if os.path.exists(os.path.join(local, "node.exe")):
         return local
+    if os.path.exists(os.path.join(local, "bin", "node")):  # macOS / Linux tarball layout
+        return os.path.join(local, "bin")
     n = shutil.which("node")
     return os.path.dirname(n) if n else None
 
@@ -224,8 +226,9 @@ def check(session, pid, project, app_port):
     t0 = time.time()
     problems, out = [], []
     nd = node_dir()
-    node = os.path.join(nd, "node.exe") if nd and os.path.exists(os.path.join(nd, "node.exe")) else (shutil.which("node") if nd else None)
-    npm = os.path.join(nd, "npm.cmd") if nd else None
+    exe = "node.exe" if os.name == "nt" else "node"
+    node = os.path.join(nd, exe) if nd and os.path.exists(os.path.join(nd, exe)) else (shutil.which("node") if nd else None)
+    npm = os.path.join(nd, "npm.cmd" if os.name == "nt" else "npm") if nd else None
     kind = "web" if entry.endswith((".html", ".htm")) else "python" if entry.endswith(".py") else \
         "node" if entry.endswith((".js", ".mjs", ".cjs")) or "package.json" in files else "other"
 

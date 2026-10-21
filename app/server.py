@@ -142,7 +142,7 @@ def llm_ctx(m):
 
 def launch_llm(m):
     if not os.path.exists(config.LLAMA_SERVER):
-        raise RuntimeError("llama-server introuvable : " + config.LLAMA_SERVER + " (relance install.ps1)")
+        raise RuntimeError("llama-server introuvable : " + config.LLAMA_SERVER + (" (relance install.ps1)" if os.name == "nt" else " (relance install.sh)"))
     args = catalog.llm_args(m)
     gpu = syscheck.current()["assess"]["mode"] != "cpu"
     ctx = llm_state["ctx"] = llm_ctx(m)

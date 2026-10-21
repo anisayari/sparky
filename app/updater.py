@@ -11,7 +11,8 @@ import config
 
 REPO = "anisayari/sparky"
 REMOTE_VERSION = os.environ.get("SPARKY_VERSION_URL") or f"https://raw.githubusercontent.com/{REPO}/main/VERSION"
-INSTALL_CMD = f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex"
+INSTALL_CMD = (f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex" if os.name == "nt"
+               else f"curl -fsSL https://raw.githubusercontent.com/{REPO}/main/install.sh | bash")
 NOWIN = config.NOWIN
 CHECK_EVERY = 3600
 
@@ -80,8 +81,13 @@ def status():
 
 def _restart():
     """Starts a new Sparky once this process has released its port, then exits."""
-    if os.name != "nt":
-        return
+    if os.name != "nt":  # macOS / Linux: a detached shell waits for the port, then starts the new server
+        log = os.path.join(config.DATA, "server.log")
+        subprocess.Popen(["/bin/sh", "-c", 'sleep 2; exec "$0" app/server.py --port "$1" >>"$2" 2>&1',
+                          sys.executable, str(config.APP_PORT), log],
+                         cwd=config.ROOT, stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        time.sleep(0.5)
+        os._exit(0)
     q = lambda p: p.replace("'", "''")
     script = (f"Start-Sleep -Seconds 2; Start-Process '{q(sys.executable)}' -ArgumentList 'app\\server.py','--port','{config.APP_PORT}' "
               f"-WorkingDirectory '{q(config.ROOT)}' -WindowStyle Hidden "
