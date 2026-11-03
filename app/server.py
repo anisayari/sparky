@@ -5,7 +5,7 @@ The assistant model, image model and settings are chosen in the UI (Settings).
 Generated projects are served on the next port (preview origin): they cannot reach the API.
 """
 import argparse, base64, io, json, os, re, shutil, subprocess, sys, threading, time, urllib.request
-import http.server, socketserver
+import http.server, secrets, socket, socketserver
 from urllib.parse import parse_qs, unquote, urlparse
 
 import psutil
@@ -16,10 +16,13 @@ import catalog
 import cloud
 import config
 import harness
+import local_access
 import localscan
 import mcp
 import openai_api
+import process_owner
 import rag
+import rag_sync
 import scheduler
 import studio
 import syscheck
@@ -35,16 +38,20 @@ MAX_BODY = 300 * 2**20  # an attached file is at most 200 MB (base64 makes it a 
 NO_ASSISTANT = "Aucun assistant n'est installé : ouvre Paramètres > Bibliothèque de modèles."
 SID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")  # Session ids (they are folder names)
 sessions = {}           # id -> Session (in memory)
+_sessions_lock = threading.RLock()
 llm_state = {"name": None, "ctx": 0}  # ctx: context window of the running llama-server
 failed = set()          # models that just failed to load: not retried automatically (the user can retry)
 # model switch in progress, tracked by the UI (spinner + steps)
 switch = {"kind": None, "id": None, "label": "", "phase": "idle", "steps": [], "t0": 0.0, "eta": 0, "error": ""}
 _switch_lock = threading.Lock()
+_engines = process_owner.Engines()
+_instance_id = secrets.token_hex(32)
 
 
 # ---------------------------------------------------------------- engines (llama-server, ComfyUI)
 def alive(url):
     try:
+        process_owner.require_endpoint(url)
         with urllib.request.urlopen(url, timeout=2):
             return True
     except Exception:
@@ -59,35 +66,11 @@ def port_listening(port):
 
 
 def stop_llm():
-    """Stops llama-server (only it: another program may use the same port)."""
-    for c in psutil.net_connections("tcp"):
-        if c.laddr and c.laddr.port == config.LLM_PORT and c.status == psutil.CONN_LISTEN and c.pid:
-            try:
-                p = psutil.Process(c.pid)
-                if "llama" in p.name().lower():
-                    p.kill()
-            except psutil.Error:
-                pass
-    for _ in range(40):
-        if not port_listening(config.LLM_PORT):
-            return
-        time.sleep(0.25)
+    _engines.stop("llm")
 
 
 def stop_comfy():
-    """Stops ComfyUI (only the python process that listens on its port)."""
-    for c in psutil.net_connections("tcp"):
-        if c.laddr and c.laddr.port == config.COMFY_PORT and c.status == psutil.CONN_LISTEN and c.pid:
-            try:
-                p = psutil.Process(c.pid)
-                if "python" in p.name().lower():
-                    p.kill()
-            except psutil.Error:
-                pass
-    for _ in range(40):
-        if not port_listening(config.COMFY_PORT):
-            return
-        time.sleep(0.25)
+    _engines.stop("comfy")
 
 
 def restart_comfy():
@@ -103,17 +86,16 @@ def free_comfy_memory(timeout=10):
         pass
 
 
-def _spawn(cmd, log, **kw):
+def _spawn(role, cmd, log, **kw):
     os.makedirs(config.DATA, exist_ok=True)
-    with open(log, "w") as out:  # the child keeps its own handle
-        return subprocess.Popen(cmd, creationflags=NOWIN, stdout=out, stderr=subprocess.STDOUT, **kw)
+    return _engines.spawn(role, cmd, log, **kw)
 
 
 def start_comfy():
     """Starts ComfyUI (image generation) if it isn't already running."""
     if port_listening(config.COMFY_PORT) or not os.path.exists(os.path.join(config.COMFY_DIR, "main.py")):
         return
-    _spawn([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(config.COMFY_PORT)],
+    _spawn("comfy", [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(config.COMFY_PORT)],
            os.path.join(config.DATA, "comfy.log"), cwd=config.COMFY_DIR)
     print("ComfyUI en cours de demarrage")
 
@@ -141,13 +123,18 @@ def llm_ctx(m):
 
 
 def launch_llm(m):
+    if port_listening(config.LLM_PORT):
+        raise RuntimeError(f"Le port de l'assistant ({config.LLM_PORT}) est déjà utilisé.")
     if not os.path.exists(config.LLAMA_SERVER):
         raise RuntimeError("llama-server introuvable : " + config.LLAMA_SERVER + " (relance install.ps1)")
     args = catalog.llm_args(m)
     gpu = syscheck.current()["assess"]["mode"] != "cpu"
     ctx = llm_state["ctx"] = llm_ctx(m)
-    _spawn([config.LLAMA_SERVER, "-m", args[0], "--port", str(config.LLM_PORT), "-ngl", "99" if gpu else "0",
-            "-c", str(ctx), "--jinja", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", *args[1:]], LLM_LOG)
+    harness.ACTIVE_CONTEXT = ctx
+    started = _spawn("llm", [config.LLAMA_SERVER, "-m", args[0], "--port", str(config.LLM_PORT), "-ngl", "99" if gpu else "0",
+                             "-c", str(ctx), "--jinja", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", *args[1:]], LLM_LOG)
+    if not started:
+        raise RuntimeError("Un assistant Sparky est déjà en cours de démarrage.")
     print("Assistant en cours de demarrage :", m["label"], f"(contexte {ctx})")
 
 
@@ -287,12 +274,13 @@ def use_model(mid, auto=False):
 def get_session(sid):
     """Session in memory or on disk; None for an unknown or malformed id (ids become folder names)."""
     sid = str(sid or "")
-    if sid in sessions:
+    with _sessions_lock:
+        if sid in sessions:
+            return sessions[sid]
+        if not SID.fullmatch(sid) or not os.path.exists(os.path.join(harness.DATA, sid, "session.json")):
+            return None
+        sessions[sid] = harness.Session.load(sid)
         return sessions[sid]
-    if not SID.fullmatch(sid) or not os.path.exists(os.path.join(harness.DATA, sid, "session.json")):
-        return None
-    sessions[sid] = harness.Session.load(sid)
-    return sessions[sid]
 
 
 _ckpts = {"t": 0.0, "v": []}
@@ -359,13 +347,6 @@ def metrics():
             "switch": {"phase": switch["phase"], "kind": switch["kind"], "label": switch["label"]}}
 
 
-def run_project(s, pid, p):
-    """Run button: same engine as the automatic tests (Python, Node.js with npm, website in a headless browser)."""
-    import checker
-    r = checker.check(s, pid, p, config.PREVIEW_PORT)
-    return {"code": r["code"], "output": r["output"] or "(aucune sortie)", "secs": r["secs"], "ok": r["ok"], "kind": r["kind"]}
-
-
 def wait_llm(emit):
     """The assistant is paused for a Studio video or reloading after it: wait (with a status) instead of failing."""
     t0 = time.time()
@@ -384,21 +365,38 @@ def apply_config(s, new):
         s.config["system"] = new["system"][:8000]
     if "docs" in new:
         s.config["docs"] = [int(x) for x in new["docs"] or []]
+    if "excluded_docs" in new:
+        s.config["excluded_docs"] = [int(x) for x in new["excluded_docs"] or []]
+    if "web_blocked" in new:
+        s.config["web_blocked"] = new["web_blocked"] is True
     if "web" in new:
         s.config["web"] = bool(new["web"])
-    import computer
-    if new.get("computer") in computer.LEVELS and new["computer"] != s.config.get("computer"):
-        s.config["computer"] = new["computer"]
-        s.config["computer_allow"] = []  # "always allow" choices do not survive a change of level
+    if "computer" in new:
+        s.set_computer_level(new["computer"])
 
 
-def run_scheduled(prompt, title):
+def run_scheduled(prompt, title, options=None):
     """Scheduled task: runs the prompt in a new conversation, returns its id."""
+    options = options or {}
+    model = options.get("model") or llm_state["name"]
+    if not model or model != llm_state["name"]:
+        raise ValueError("Le modèle prévu pour cette tâche doit être actif.")
     s = harness.Session()
     s.meta["title"] = "⏰ " + title
     sessions[s.id] = s
-    s.config["web"] = True  # tasks like "summarize today's news" need the web
-    s.turn(prompt, [], None, None, lambda e: None)
+    s.config["web"] = options.get("web", True)  # preserve the behavior of schedules created before 1.7
+    error = None
+    def record(event):
+        nonlocal error
+        if event.get("type") == "error":
+            error = event.get("text")
+    binding = harness.required_model.set(model)
+    try:
+        status = s.turn(prompt, [], None, None, record)
+    finally:
+        harness.required_model.reset(binding)
+    if status != "completed" or error:
+        raise RuntimeError(error or f"Tâche inachevée ({status}).")
     return s.id
 
 
@@ -451,7 +449,7 @@ def update_settings(new):
         if isinstance(new.get(k), str):
             harness.SETTINGS[k] = new[k][:8000].strip()
     if "mcp_on" in new:
-        harness.SETTINGS["mcp_on"] = bool(new["mcp_on"])
+        mcp.set_enabled(bool(new["mcp_on"]))
     if "llm_ctx" in new:  # 0 = automatic; takes effect at the next (re)start of the assistant
         try:
             n = int(new["llm_ctx"] or 0)
@@ -464,6 +462,7 @@ def update_settings(new):
 # ---------------------------------------------------------------- HTTP API
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    preview = False
 
     def log_message(self, *a):
         pass
@@ -472,6 +471,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
+        if code >= 400:
+            self.close_connection = True
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -479,22 +480,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+        if code >= 400 and self.command == "POST":
+            # Deliver the rejection before closing a Windows socket with incoming bytes.
+            # Discard at most one buffer. It can never become a second request.
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+                self.connection.settimeout(0.1)
+                self.rfile.read1(65536)
+            except OSError:
+                pass
+
+    def end_headers(self):
+        if self.close_connection and not any(h.lower().startswith(b"connection:") for h in getattr(self, "_headers_buffer", ())):
+            self.send_header("Connection", "close")
+        super().end_headers()
+
+    def local_owner(self):
+        if not hasattr(self, "_owned_connection"):
+            self._owned_connection = local_access.same_account(self.connection)
+        return self._owned_connection
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        # Several valid POST handlers never consume the body. Close after the first response.
+        if self.command == "POST":
+            self.close_connection = True
+        port = self.server.server_address[1]
+        authorities = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
+        if port == 80:
+            authorities.update(("127.0.0.1", "localhost", "[::1]"))
+        hosts = self.headers.get_all("Host", [])
+        if len(hosts) != 1 or hosts[0].lower() not in authorities:
+            self.send(403, {"error": "invalid local authority"})
+            return False
+        lengths = self.headers.get_all("Content-Length", [])
+        if (self.headers.get_all("Transfer-Encoding") or len(lengths) > 1
+                or (lengths and (not re.fullmatch(r"[0-9]{1,10}", lengths[0])
+                                 or (self.command != "POST" and int(lengths[0]) != 0)))):
+            self.send(400, {"error": "invalid request framing"})
+            return False
+        return True
 
     def trusted(self):
-        """Only the Sparky page may drive the API: a foreign Host is a DNS-rebinding attempt, a foreign Origin
-        (another website, or a generated project on the preview port) is a cross-site request."""
-        if urlparse("//" + (self.headers.get("Host") or "")).hostname not in LOCAL_HOSTS:
+        """Management requests belong to the local account and browser origin."""
+        if not self.preview and self.path.startswith("/v1/"):  # authenticated independently by its bearer key
+            return True
+        if not self.local_owner():
             return False
-        if self.path.startswith("/v1/"):  # OpenAI-compatible API: protected by its bearer key (openai_api.py)
-            return True
-        if self.command != "POST":
-            return True
+        if self.preview:
+            return self.command == "GET"
         origin = self.headers.get("Origin")
-        if origin is not None:
-            o = urlparse(origin)
-            if o.hostname not in LOCAL_HOSTS or (o.port or 80) != self.server.server_address[1]:
-                return False
-        return self.headers.get("Sec-Fetch-Site") != "cross-site"
+        if origin is not None and origin.lower() != f"http://{self.headers['Host'].lower()}":
+            return False
+        return self.headers.get("Sec-Fetch-Site") not in ("cross-site", "same-site")
 
     def raw_body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -667,11 +706,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 imgs[i] = base64.b64encode(open(v["path"], "rb").read()).decode()
             except OSError:
                 pass
-        st = {k: getattr(s, k) for k in ("history", "events", "n", "lang", "artifacts", "projects", "config", "meta", "turns")}
-        st |= {"format": "sparky-chat", "version": 1, "title": title,
+        private_copy = q.get("fmt") == "backup"
+        st = {k: getattr(s, k) for k in ("n", "lang", "artifacts", "projects", "meta", "turns")}
+        st["history"] = []
+        # Keep one event per original event: turn boundaries are indexes into this list.
+        st["events"] = (s.events if private_copy else
+                        [event | {"items": []} if event.get("type") == "sources" and event.get("kind") == "docs"
+                         else event for event in s.events])
+        for message in s.history:
+            portable = {k: v for k, v in message.items() if k != "rag_hits"}
+            if message["role"] == "user":
+                portable["text"] = s._scoped_history_text(message, set())
+                if private_copy and message.get("rag_hits"):
+                    portable["rag_hits"] = rag.live_hits(message["rag_hits"], s.doc_ids())
+            st["history"].append(portable)
+        st |= {"format": "sparky-chat", "version": 1, "purpose": "local-backup" if private_copy else "share", "title": title,
                "images": {i: {k: v for k, v in s.images[i].items() if k != "path"} | {"png": b} for i, b in imgs.items()}}
         self.send(200, json.dumps(st, ensure_ascii=False).encode(), "application/json",
-                  [("Content-Disposition", f'attachment; filename="{name}.json"')])
+                  [("Content-Disposition", f'attachment; filename="{name}{"-local" if private_copy else ""}.json"')])
 
     def workspace_get(self, path):
         d = workspace.get()
@@ -679,6 +731,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "api": openai_api.settings() | {"url": f"http://127.0.0.1:{config.APP_PORT}/v1",
                                                              "model": llm_state["name"]},
                             "schedules": scheduler.list_(), "unread": scheduler.unread(),
+                            "task_models": [{"id": mid, "label": LLMS[mid]["label"]} for mid in installed_llms()],
                             "settings": {k: harness.SETTINGS.get(k) for k in ("custom", "searx", "mcp_on")}})
 
     def studio_lib(self, path):
@@ -767,44 +820,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self.send(500, {"error": f"transcription impossible : {e}"})
 
-    def import_chat(self, path):  # a conversation exported by Sparky (JSON), or a plain [{role, content}] list
+    def import_chat(self, path):
+        import chat_import
         b = self.body()
-        d = b.get("data")
-        s = harness.Session()
-        if isinstance(d, list):
-            d = {"messages": d}
-        if not isinstance(d, dict):
-            return self.send(400, {"error": "fichier non reconnu"})
-        if d.get("format") == "sparky-chat":
-            os.makedirs(s.dir, exist_ok=True)
-            for i, v in (d.get("images") or {}).items():
-                p = os.path.join(s.dir, f"import_{int(i)}.png")
-                with open(p, "wb") as f:
-                    f.write(base64.b64decode(v.pop("png", "")))
-                s.images[int(i)] = v | {"path": p}
-            for k in ("history", "events", "n", "lang", "artifacts", "projects", "config", "meta"):
-                if k in d:
-                    setattr(s, k, d[k] if k not in ("config", "meta") else getattr(s, k) | d[k])
-            s.turns = [tuple(x) for x in d.get("turns", [])]
-        else:
-            msgs = d.get("messages") or []
-            for m in msgs:
-                role, text = m.get("role"), m.get("content")
-                if isinstance(text, list):
-                    text = " ".join(x.get("text", "") for x in text if isinstance(x, dict))
-                if role == "user":
-                    s.turns.append((len(s.history), len(s.events)))
-                    s.history.append({"role": "user", "text": text or "", "images": [], "raw": text or ""})
-                    s.events.append({"type": "user", "text": text or "", "ts": time.time()})
-                elif role == "assistant":
-                    s.history.append({"role": "assistant", "text": json.dumps({"action": "reply", "args": {"text": text}}, ensure_ascii=False)})
-                    s.events.append({"type": "reply", "text": text or "", "ts": time.time()})
-            if not s.events:
-                return self.send(400, {"error": "aucun message trouvé"})
-            s.meta["title"] = (d.get("title") or "")[:60] or None
-        s.meta["title"] = s.meta.get("title") or ("Importé : " + s.title())
+        try:
+            s = chat_import.restore(b.get("data") if isinstance(b, dict) else None)
+        except ValueError:
+            return self.send(400, {"error": "fichier de conversation invalide"})
         sessions[s.id] = s
-        s.save()
         self.send(200, {"id": s.id})
 
     def chat_meta(self, path):  # rename, pin, folder
@@ -825,15 +848,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         s = get_session(b.get("id"))
         if not s:
             return self.send(404, {"error": "conversation inconnue"})
-        apply_config(s, b.get("config") or {})
-        s.save()
-        self.send(200, {"ok": True, "config": s.config})
+        changes = b.get("changes")
+        if not isinstance(changes, dict):
+            # Older tabs sent their entire snapshot even when editing an unrelated preference.
+            return self.send(409, {"error": "Recharge cet onglet avant de modifier les autorisations."})
+        if set(changes) - {"assistant", "system", "web", "web_blocked", "computer", "document_choice"}:
+            return self.send(400, {"error": "Un réglage documentaire modifie une seule collection à la fois."})
+        with s._storage_lock:
+            if "document_choice" in changes:
+                choice = changes["document_choice"]
+                if (set(changes) != {"document_choice"} or not isinstance(choice, dict) or
+                        type(choice.get("id")) is not int or type(choice.get("selected")) is not bool):
+                    return self.send(400, {"error": "Choix de collection invalide."})
+                cid, enable = choice["id"], choice["selected"]
+                if enable and not rag.existing_collections([cid]):
+                    return self.send(404, {"error": "Cette collection a été supprimée."})
+                docs = set(s.config.get("docs") or []) - {cid}
+                excluded = set(s.config.get("excluded_docs") or []) - {cid}
+                if not enable:
+                    excluded.add(cid)
+                elif cid not in (s.assistant().get("docs") or []):
+                    docs.add(cid)
+                changes = {"docs": sorted(docs), "excluded_docs": sorted(excluded)}
+            apply_config(s, changes)
+            s.save()
+            current = dict(s.config)
+        self.send(200, {"ok": True, "config": current})
 
     def version(self, path):  # shows another version of a message (after edit / regenerate)
         b = self.body()
         s = get_session(b.get("id"))
         if not s or s.lock.locked():
             return self.send(409, {"error": "conversation occupée"})
+        if s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         with s.lock:
             s.switch_version(int(b["k"]), int(b["j"]))
         self.send(200, {"ok": True})
@@ -844,6 +892,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         s = get_session(b.get("id"))
         if not s:
             return self.send(404, {"error": "conversation inconnue"})
+        if s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         emit = self.stream()
         emit({"type": "ack", "id": s.id, "busy": s.lock.locked()})
         if not llm_state["name"]:
@@ -851,9 +901,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit({"type": "done"})
             return
         if b.get("mode") == "continue":
-            return s.turn("", [], None, None, emit, kind="continue")
+            return s.turn("", [], None, None, emit, kind="continue", turn_id=b.get("turnId"))
         k = int(b.get("k", len(s.turns) - 1))
-        s.turn(b.get("text") if b.get("mode") == "edit" else None, [], None, None, emit, rewind=k)
+        s.turn(b.get("text") if b.get("mode") == "edit" else None, [], None, None, emit, rewind=k, turn_id=b.get("turnId"))
+
+    def cancel_turn(self, path):
+        b = self.body()
+        session = get_session(b.get("id"))
+        ok = bool(session and session.cancel_turn(b.get("turnId")))
+        self.send(200 if ok else 409, {"ok": ok, "error": None if ok else "Ce tour est déjà terminé ou en attente."})
+
+    def fork_chat(self, path):
+        b = self.body()
+        session = get_session(b.get("id"))
+        if not session:
+            return self.send(404, {"error": "Conversation inconnue."})
+        if not session.lock.acquire(blocking=False):
+            return self.send(409, {"error": "Conversation en cours."})
+        try:
+            branch = session.fork(b.get("k"), after_reply=b.get("side") != "user")
+        except (ValueError, OSError) as exc:
+            return self.send(400, {"error": str(exc)})
+        finally:
+            session.lock.release()
+        sessions[branch.id] = branch
+        self.send(200, {"id": branch.id})
 
     def workspace_save(self, path):
         """Assistants, prompts, knowledge, MCP servers, API, scheduled tasks: {what, action, ...}."""
@@ -866,6 +938,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send(200, {"ok": True})
                 return self.send(200, {"id": workspace.save(what, b.get("item") or {})})
             if what == "collection":
+                if act == "folder":
+                    rag_sync.set_folder(int(b["id"]), str(b.get("folder") or ""))
+                    return self.send(200, {"ok": True})
                 if act == "delete":
                     rag.delete_collection(int(b["id"]))
                 elif act == "rename":
@@ -901,7 +976,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if act == "delete":
                     scheduler.delete(b.get("id"))
                 elif act == "run":
-                    scheduler.run_now(b.get("id"))
+                    if not scheduler.run_now(b.get("id")):
+                        return self.send(409, {"error": "Tâche indisponible ou en attente de validation."})
+                elif act == "cancel":
+                    if not scheduler.cancel_workflow(b.get("id"), b.get("run")):
+                        return self.send(409, {"error": "Cette séquence n’est plus en cours."})
+                elif act == "review":
+                    if not scheduler.review_result(b.get("id"), b.get("run"), b.get("decision")):
+                        return self.send(409, {"error": "Ce résultat n’est plus en attente de validation."})
                 elif act == "read":
                     scheduler.mark_read(b.get("id"))
                 else:
@@ -938,10 +1020,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if act == "delete":
                 return self.send(200, {"ok": studio.delete(b.get("id"))})
             if act == "cancel":
-                j = next((j for j in studio.jobs if j["id"] == b.get("id") and j["state"] == "queued"), None)
-                if j:
-                    j.update(state="error", error="annulé", ended=time.time())
-                return self.send(200, {"ok": bool(j)})
+                return self.send(200, {"ok": studio.cancel(b.get("id"))})
         except ValueError as e:
             return self.send(400, {"error": str(e)})
         self.send(404, {"error": "introuvable"})
@@ -958,19 +1037,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, {"ok": True})
 
     def new_session(self, path):
-        s = harness.Session(ephemeral=bool(self.body().get("ephemeral")))
+        b = self.body()
+        s = harness.Session(ephemeral=bool(b.get("ephemeral")))
+        if isinstance(b.get("config"), dict):
+            apply_config(s, b["config"])
+        s.save()
         # a previous ephemeral conversation disappears as soon as another one is opened
-        for k in [k for k, v in sessions.items() if v.ephemeral]:
-            sessions.pop(k).delete()
-        sessions[s.id] = s
+        with _sessions_lock:
+            for k, v in list(sessions.items()):
+                if v.ephemeral and v.delete():
+                    sessions.pop(k, None)
+            sessions[s.id] = s
         self.send(200, {"id": s.id, "ephemeral": s.ephemeral})
 
     def delete_session(self, path):
         sid = self.body().get("id")
-        s = get_session(sid)
-        sessions.pop(sid, None)
-        if s:
-            s.delete()
+        with _sessions_lock:
+            s = get_session(sid)
+            if s and not s.delete():
+                return self.send(409, {"error": "Conversation en cours. Arrête la génération avant de la supprimer."})
+            sessions.pop(sid, None)
+            if s:
+                scheduler.remove_result(sid)
         self.send(200, {"ok": True})
 
     def install(self, path):
@@ -982,13 +1070,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def rescan(self, path):
         self.send(200, syscheck.run())
 
-    def projrun(self, path):  # runs a project, only when the user clicks Run
+    def projrun(self, path):  # legacy URL for the Check project button
+        import checker
         b = self.body()
         s = get_session(b.get("id"))
         p = (s.projects if s else {}).get(b.get("project"))
         if not p:
             return self.send(404, {"error": "projet inconnu"})
-        self.send(200, run_project(s, b["project"], p))
+        self.send(200, checker.check(p))
 
     def onboarded(self, path):
         harness.SETTINGS["onboarded"] = True
@@ -1086,11 +1175,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def chat(self, path):
         b = self.body()
         s = get_session(b.get("id"))
+        if s and s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         if s is None:  # unknown id (e.g. after a restart): a private chat must stay private
             s = harness.Session(ephemeral=bool(b.get("ephemeral")))
-            sessions[s.id] = s
-        if isinstance(b.get("config"), dict):  # setup chosen before the first message (assistant, web, documents)
-            apply_config(s, b["config"])
+            if not b.get("id") and isinstance(b.get("config"), dict):
+                apply_config(s, b["config"])
+            with _sessions_lock:
+                sessions[s.id] = s
         emit = self.stream()
         emit({"type": "ack", "id": s.id, "busy": s.lock.locked()})  # received by the server
         wait_llm(emit)
@@ -1100,12 +1192,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         uploads = [decode_image(u).convert("RGB") for u in b.get("images", [])]
         mask = decode_image(b["mask"]).convert("RGB") if b.get("mask") else None
-        s.turn(b.get("text", ""), uploads, mask, b.get("maskFor"), emit, files=attach.take(b.get("files")))
+        s.turn(b.get("text", ""), uploads, mask, b.get("maskFor"), emit, files=attach.take(b.get("files")),
+               turn_id=b.get("turnId"))
 
     def bot(self, path):
         """Sparky Bot: companion with long-term memory (see companion.py)."""
         import companion
-        action, b, S = path[len("/api/bot/"):], self.body(), companion.S
+        action, b = path[len("/api/bot/"):], self.body()
         if action in ("chat", "greet"):
             if not llm_state["name"]:
                 return self.send(409, {"error": NO_ASSISTANT})
@@ -1121,22 +1214,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit({"type": "done"})
             return
         if action == "memory":  # add / edit / delete / pin one memory
-            if b.get("delete"):
-                S.delete_memory(int(b["id"]))
-            elif b.get("id"):
-                S.update_memory(int(b["id"]), b.get("text"), b.get("category"), b.get("importance"), b.get("pinned"))
-            else:
-                S.add_memory(b.get("text", ""), b.get("category", "other"), int(b.get("importance") or 4), source="user")
+            companion.edit_memory(b)
         elif action == "style":
-            S.set("style", {k: v for k, v in (b.get("style") or {}).items() if v})
+            companion.edit_style(b.get("style") or {})
         elif action == "profile":
-            p = companion.profile()
-            p.update({k: b[k] for k in ("name", "persona", "custom", "memory_on") if k in b})
-            S.set("profile", p)
+            companion.update_profile(b)
         elif action == "reflect":
             return self.send(200, {"ok": companion.reflect(force=True)})
         elif action == "forget":
-            S.forget_all()
+            companion.forget_all()
         else:
             return self.send(404, {"error": "introuvable"})
         self.send(200, {"ok": True})
@@ -1144,6 +1230,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 _json = lambda f: lambda h, p: h.send(200, f())  # noqa: E731  routes that only return data
 GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo, "/api/health": Handler.health,
+       "/api/instance": _json(lambda: {"instance": _instance_id}),
        "/api/metrics": _json(metrics), "/api/sessions": _json(harness.Session.list_all), "/api/state": Handler.state,
        "/api/projzip": Handler.projzip, "/api/settings": Handler.settings, "/api/syscheck": _json(syscheck.current),
        "/api/bot": Handler.bot_state, "/api/voice": Handler.voice, "/api/localscan": _json(localscan.status),
@@ -1154,6 +1241,7 @@ GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo
        "/api/studio": Handler.studio_lib}
 GET_PREFIX = [("/api/img/", Handler.image), ("/vendor/", Handler.vendor), ("/api/studio/file/", Handler.studio_file)]
 POST = {"/api/new": Handler.new_session, "/api/delete": Handler.delete_session, "/api/install": Handler.install,
+        "/api/turn/cancel": Handler.cancel_turn, "/api/fork": Handler.fork_chat,
         "/api/syscheck": Handler.rescan, "/api/projrun": Handler.projrun, "/api/onboarded": Handler.onboarded,
         "/api/use": Handler.use, "/api/restart": Handler.restart,"/api/attach": Handler.attach_add, "/api/cloud/key": Handler.cloud_key,
         "/api/cloud/remove": Handler.cloud_remove, "/api/cloud/add": Handler.cloud_add,
@@ -1168,6 +1256,8 @@ POST_PREFIX = [("/api/transcribe", Handler.transcribe), ("/api/bot/", Handler.bo
 
 class PreviewHandler(Handler):
     """Generated projects, on their own origin (port + 1): their code cannot call the API above."""
+
+    preview = True
 
     def project(self, path):  # /api/proj/<session>/<project>/<path>
         import mimetypes
@@ -1192,7 +1282,27 @@ class PreviewHandler(Handler):
         self.dispatch({}, [("/api/proj/", PreviewHandler.project)])
 
     def do_POST(self):
-        self.send(403, {"error": "requête refusée"})
+        # The UI can preview even unsaved snippets without storing a copy or putting their source in the URL.
+        self.close_connection = True
+        host = urlparse("//" + (self.headers.get("Host") or "")).hostname
+        origin = self.headers.get("Origin")
+        local = host in LOCAL_HOSTS and origin == f"http://{'[' + host + ']' if host == '::1' else host}:{config.APP_PORT}"
+        if (self.path != "/artifact" or not local or self.headers.get_content_type() != "application/x-www-form-urlencoded"
+                or not self.local_owner()):
+            return self.send(403, {"error": "requête refusée"})
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+            if self.headers.get("Transfer-Encoding") or length < 0:
+                raise ValueError
+            if length > MAX_BODY:
+                return self.send(413, {"error": "fichier trop gros"})
+            form = parse_qs(self.rfile.read(length).decode(), max_num_fields=1, strict_parsing=True, keep_blank_values=True)
+            html = form["html"][0].encode()
+        except (ValueError, KeyError):
+            return self.send(400, {"error": "aperçu invalide"})
+        self.send(200, html, "text/html; charset=utf-8",
+                  [("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-modals allow-popups allow-pointer-lock"),
+                   ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer")])
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -1201,7 +1311,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def first_assistant():
     """Loads an assistant at startup (through the switch, so the UI shows the loading steps)."""
-    if alive(harness.LLM + "/health"):  # llama-server still running from a previous session
+    if config.EXTERNAL_LLM and alive(harness.LLM + "/health"):
         llm_state["name"] = harness.SETTINGS["llm"]
         return
     ok, rec = installed_llms(), syscheck.current().get("recommended", {}).get("llm")
@@ -1219,7 +1329,25 @@ def main():
     ap.add_argument("--no-comfy", action="store_true")
     a = ap.parse_args()
     config.APP_PORT, config.PREVIEW_PORT = a.port, a.port + 1
+    with process_owner.instance(config.ROOT) as stop_requested, Server(("127.0.0.1", a.port), Handler) as ui, \
+            Server(("127.0.0.1", config.PREVIEW_PORT), PreviewHandler) as preview:
+        try:
+            _serve(a, ui, preview, stop_requested)
+        finally:
+            _engines.close()
+
+
+def _serve(a, ui, preview, stop_requested):
+    process_owner.manage_requests(_engines)
+    config.write_json(os.path.join(config.ROOT, "data", "instance.json"), {"instance": _instance_id})
     harness.load_settings()
+    # Older builds kept the last raw model output, even for ephemeral chats.
+    try:
+        os.unlink(os.path.join(harness.DATA, "last_llm.txt"))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        print("Could not remove the legacy last_llm.txt diagnostic. Remove it from the data folder when unlocked.")
     if harness.SETTINGS.get("llm") and harness.SETTINGS["llm"] not in LLMS:
         harness.SETTINGS["llm"] = None  # old setting pointing to a model removed from the catalog
     shutil.rmtree(os.path.join(harness.DATA, "_tmp"), ignore_errors=True)  # leftovers from ephemeral conversations
@@ -1235,14 +1363,19 @@ def main():
         threading.Thread(target=autostart, daemon=True).start()
     updater.start()
     attach.server_voice = voice_model
+    rag_sync.start(stop_requested)
     openai_api.active_model = lambda: (llm_state["name"], LLMS[llm_state["name"]]["label"]) if llm_state["name"] in LLMS else None
     threading.Thread(target=mcp.start_all, daemon=True).start()
     scheduler.start(run_scheduled)
     studio.hooks.update(before_video=pause_llm_for_video, after_queue=resume_llm_after_video)
-    preview = Server(("127.0.0.1", config.PREVIEW_PORT), PreviewHandler)
     threading.Thread(target=preview.serve_forever, daemon=True).start()
     print(f"Sparky {updater.current()} : http://127.0.0.1:{a.port}")
-    Server(("127.0.0.1", a.port), Handler).serve_forever()
+    ui.timeout = 0.25
+    try:
+        while not stop_requested():
+            ui.handle_request()
+    finally:
+        preview.shutdown()
 
 
 if __name__ == "__main__":

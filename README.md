@@ -26,8 +26,9 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 ## ✨ What it does
 
 ### 💬 Chat
-- 🔒 **Like ChatGPT, offline** — history, plus 👻 **temporary chats** that are never saved.
+- 🔒 **Local chat history** — temporary chats keep their own transient files and support text and vision. Use a regular chat for image generation or editing, because the shared ComfyUI engine retains inputs and outputs.
 - ✏️ **Edit** any message, 🔁 **regenerate** or ➡️ **continue** an answer, and flip between versions (‹ 2/3 ›).
+- Open a separate conversation from a message to try another approach. Generated files follow the selected version. Use **Stop** to interrupt a running turn.
 - 🧠 **Adjustable thinking** — Off, Light, Normal or Deep, and see how the model reasoned.
 - 📝 **Rich answers** — tables, LaTeX formulas, Mermaid diagrams, task lists, syntax-highlighted code (all offline).
 - 👁️ **Vision** — drop photos, screenshots or scans: the assistant sees and analyses them.
@@ -36,6 +37,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 
 ### 📚 Knowledge & web
 - 📄 **Ask your documents (RAG)** — collections of PDFs, Office files, text, code… indexed on your PC, answers **with numbered sources** [1] [2].
+- Link a local folder in **Workspace > Documents** to index additions, edits and removals. When upgrading an existing library, reselect the collections for each assistant or conversation that needs them. The library retains the documents.
 - 🌐 **Web search, when you want it** — turn on *Web*: the assistant searches (DuckDuckGo or your SearXNG), reads pages and the links you paste, and cites them. Off by default.
 - 🧑‍💼 **Assistants** — a role, its documents and web access, reusable in one click.
 - ⚡ **Prompt library** — type **/** to insert a saved prompt with `{{variables}}`; standing instructions for every chat or just one.
@@ -44,7 +46,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 🎬 **Studio: images & videos** — a gallery of everything you generated, with a Grok-Imagine-like prompt bar: **text → image**, **text → video**, **image → video** ("Animate"). Videos come **with synchronized sound** 🔊 (LTX-2.5), and your idea is expanded into a detailed prompt first.
 - 🖼️ **Images** — generate and edit by asking ("make it snow", "remove the bottle"); the agent checks its own result and retries.
 - 🧩 **Code & apps panel** — games, pages, tools and scripts written live next to the chat, with a **running preview**.
-- 🏗️ **Multi-file projects** — websites (`index.html` + `css/` + `js/`), Python or Node.js programs; the assistant makes the pictures, then Sparky **tests the project automatically** (headless browser, `npm install`, run) and the model **fixes the errors until it works**. ▶ Run anytime, download as ZIP.
+- 🏗️ **Multi-file projects** — build websites, Python or Node.js projects with generated assets. Sparky checks source syntax and local resource references, then sends errors back to the assistant for repair. Preview a website on the isolated origin, rerun the checks, or download the project as a ZIP. Native execution and package installation are disabled in the checker.
 
 ### 🎙️ Voice
 - 🎤 **Dictation, offline** — click the mic, talk, stop: Whisper writes it in the input box.
@@ -54,6 +56,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 💻 **Computer mode** — Sparky can look at and act on your PC: browse folders and the desktop, read and search files (PDF and Office too), take a screenshot, write, copy, move, send to the Recycle Bin, open files and apps, run PowerShell commands. **You choose the security level** for each chat: *Off*, *Read only*, *Read freely & ask before changes* (recommended), *Ask for everything* or *Full access*; actions that need your OK show an **approval card** (Allow / Always in this chat / Deny).
 - 🔌 **MCP tools** — plug any Model Context Protocol server (same config as Claude Desktop: files, GitHub, databases…).
 - ⏰ **Scheduled tasks** — "every morning at 8, summarize the tech news": the answer lands in a new chat.
+- In **Workspace > Tasks**, select a model and enable Web for tasks that need it. Choosing a collection runs a read-only document search and cited summary. Review the resulting conversation and approve or reject the summary before the next run. A pinned model must be active when its task runs.
 - 🔗 **OpenAI-compatible API** — use Sparky's model from Continue, VS Code extensions or scripts at `http://127.0.0.1:7860/v1`. Off by default.
 - 🤖 **Sparky Bot (beta)** — a companion that remembers you and learns your style, with a memory you can see and edit ([details](#-sparky-bot--personal-companion-with-memory-beta-in-progress)).
 
@@ -78,7 +81,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 | 🎬 **Studio** | media library of every image and video (Studio and chats) · text → image · text → video · image → video ("Animate") · 16:9, 9:16, 1:1, 4:3, 3:4 · 3 to 10 s · prompt enhancement · video player, download, reuse prompt · the local assistant pauses during a video and comes back after |
 | 🎞️ **Video models** | LTX-2.5 22B (video + sound, ~40 s for 4 s of video on an RTX Spark once loaded) · Wan 2.2 5B (lighter, no sound) |
 | 🖼️ **Images** | generate and edit by instruction (FLUX.2 Klein, Qwen-Image 2.1, SDXL) · paint a zone to edit · reuse a face, character, style or scene · the agent checks its result and retries |
-| 🧩 **Code & projects** | artifacts panel with live preview, code, versions, download · multi-file projects (web, Python, Node.js) · automatic test-and-fix loop (headless browser, Python, `npm install` / build / test) · ▶ Run · ZIP download · generated pictures inside projects |
+| 🧩 **Code & projects** | isolated web previews, versions and downloads · multi-file projects (web, Python, Node.js) · automatic static checks with repair feedback · ZIP export with generated assets |
 | 📝 **Markdown** | GFM tables · task lists · LaTeX (KaTeX) · Mermaid diagrams · syntax highlighting · citations · served locally (no CDN) |
 | 🎙️ **Voice** | offline dictation (Whisper large-v3 turbo / base) with live level bars · offline read-aloud (Piper voices: en, fr, de, es, it) |
 | 💻 **Computer mode** | list, read (PDF / Office), search, info, screenshot · write, mkdir, copy, move · Recycle Bin (never a permanent delete) · open files / apps / URLs · PowerShell commands (2 min timeout) · 5 security levels per chat · approval cards (once / always in this chat / deny) · system folders always protected |
@@ -153,6 +156,8 @@ irm https://raw.githubusercontent.com/anisayari/sparky/main/install.ps1 | iex
 
 **Or** download the project (*Code > Download ZIP*), unzip it and double-click `install.bat`.
 
+For a smaller chat installation, run `.\install.ps1 -ChatOnly` from the downloaded project. Run the installer again with the full profile to add Studio later.
+
 The installer walks you through 7 simple steps:
 
 1. choose your language (English / Français) and check your machine,
@@ -167,7 +172,7 @@ The installer walks you through 7 simple steps:
 
 Sparky then opens at <http://127.0.0.1:7860> on its welcome screen: pick your language, see the system scan, use the models **already on your PC** in one click, or install the recommended ones (or any other from *See all models*). Nothing is downloaded without your click.
 
-Next times, double-click the shortcut (or `start.bat`). To stop everything: `stop.bat`.
+Next time, double-click the shortcut or `start.bat`. On Windows, `stop.bat` waits for this installation to exit. The server closes only the engines it started and their descendants. Engines started separately or by an older version can be closed in their original application.
 
 Installer options: `-Lang en|fr`, `-Dir <folder>`, `-Yes` (no questions), `-Models` (also download the recommended models from the terminal), `-NoLaunch`. For the one-line install, use the environment variables `SPARKY_LANG`, `SPARKY_DIR`, `SPARKY_YES`, `SPARKY_MODELS`, `SPARKY_NOLAUNCH`.
 
@@ -265,7 +270,13 @@ Sparky is 100% local by default. If you want, *Settings > Cloud models* lets you
 
 Everything runs on your machine: conversations, documents, images and models stay in the install folder (`data\`, `models\`). The only outgoing connections download the tools and models (GitHub, PyPI, Hugging Face, the Piper voices), search the model library, check for updates (the `VERSION` file on GitHub), and — only when you turn them on — search the web and read pages (*Web* chip of a chat, scheduled tasks), run MCP tools that reach the internet, or talk to a cloud provider.
 
-The local API only answers the Sparky page itself: requests from other websites (cross-site or DNS rebinding) are refused, and the projects the assistant writes run on their own origin (port 7861), so their code cannot drive Sparky. The OpenAI-compatible API (`/v1`) is off by default; when on, it requires its key and still only listens on `127.0.0.1`. Web reading refuses private and local addresses.
+The management API verifies that the local client belongs to the same OS account and checks the browser origin. Web previews use a separate port. The optional OpenAI-compatible API (`/v1`) requires its bearer key and listens on `127.0.0.1`. Public web requests connect to a validated public IP at each redirect.
+
+After upgrading from 1.6.1 or earlier, select the assistant, document collections, web access and Computer permissions again for existing conversations. Older session files do not record whether these settings were chosen locally or imported from someone else's file.
+
+**Local-only companion** in the companion settings requires an active local model for that companion. With a cloud model and cloud access enabled for the companion, its exchanges and enabled memory context can go to the displayed provider. The JSON sharing export removes internal document-source previews. Text already quoted in visible messages remains part of the transcript.
+
+Sparky normally connects to engines started by its installation. To deliberately reuse a separately managed llama.cpp or ComfyUI server on the configured loopback port, set `allow_external_llm` or `allow_external_comfy` to `true` in your configuration.
 
 ## 💻 Computer mode and security
 
@@ -332,7 +343,7 @@ app/
   localscan.py  finds the models already on the PC (LM Studio, Ollama, Hugging Face...)
   updater.py    version check and one-click update (git pull)
   cloud.py      optional cloud providers (OpenRouter, Claude, OpenAI-compatible...)
-  checker.py    automatic project tests (headless browser, Python, Node.js)
+  checker.py    static syntax and local resource checks for generated projects
   stt.py        offline voice dictation (Whisper)
   tts.py        offline read-aloud (Piper voices through onnxruntime + espeak-ng)
   computer.py   computer mode: file / app / command tools, security levels, protected folders

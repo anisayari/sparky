@@ -14,7 +14,7 @@ def agent(monkeypatch):
     monkeypatch.setitem(harness.SETTINGS, "llm", None)
     asked = []
 
-    def run(script, text="Bonjour, écris-moi quelque chose s'il te plaît", files=()):
+    def run(script, text="Bonjour, écris-moi quelque chose s'il te plaît", files=(), ephemeral=True):
         script = list(script)
 
         def fake(body, think="off"):
@@ -23,7 +23,7 @@ def agent(monkeypatch):
             yield (out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)), ""
         monkeypatch.setattr(harness, "chat_deltas", fake)
         monkeypatch.setattr(harness, "chat_once", lambda body: body["messages"][0]["content"].split("\n\n", 1)[-1])
-        s = harness.Session(ephemeral=True)
+        s = harness.Session(ephemeral=ephemeral)
         events = []
         s.turn(text, [], None, None, events.append, files=files)
         return s, events
@@ -113,7 +113,10 @@ def test_attached_files_reach_the_model(agent):
 
 def test_out_of_steps_ends_with_an_honest_reply(agent, monkeypatch):
     monkeypatch.setitem(harness.SETTINGS, "max_steps", 2)
-    s, ev = agent([{"action": "generate", "args": {"prompt": f"chat {i}"}} for i in range(10)])
+    def unavailable(self, args):
+        raise RuntimeError("test image engine unavailable")
+    monkeypatch.setattr(harness.Session, "tool_generate", unavailable)
+    s, ev = agent([{"action": "generate", "args": {"prompt": f"chat {i}"}} for i in range(10)], ephemeral=False)
     assert kinds(ev)[-2:] == ["reply", "done"]
     assert "error" in kinds(ev)  # no image engine in the tests: the tool error is reported
 
@@ -126,3 +129,59 @@ def test_model_failure_is_reported(agent, monkeypatch):
     events = []
     s.turn("salut", [], None, None, events.append)
     assert kinds(events) == ["user", "error", "done"] and "connexion impossible" in events[1]["text"]
+
+
+@pytest.mark.parametrize("action", ["generate", "edit"])
+def test_temporary_images_blocked_before_comfy_even_on_rewind(agent, monkeypatch, action):
+    def unexpected(*args, **kwargs):
+        pytest.fail("temporary content reached ComfyUI")
+    monkeypatch.setattr(harness, "comfy_file", unexpected)
+    monkeypatch.setattr(harness, "comfy_run", unexpected)
+    args = {"image": 1, "prompt": "private", "refs": [{"image": 1}], "region": "mask", "project": "p", "path": "hero.png"}
+    packed = ('{"action":"%s","args":%s,"action":"reply","args":{"text":"pretend success"}}' % (action, json.dumps(args)))
+    session, events = agent([packed])
+    assert kinds(events) == ["user", "reply", "done"]
+    assert "conversation normale" in events[-2]["text"] and not session.projects and not session.images
+
+    monkeypatch.setattr(session, "ask_llm", lambda: {"action": action, "args": args})
+    events.clear()
+    session.turn(None, [], None, None, events.append, rewind=0)
+    assert kinds(events) == ["user", "reply", "done"] and "ComfyUI" in events[-2]["text"]
+    with pytest.raises(PermissionError, match="ComfyUI"):
+        (session.tool_generate if action == "generate" else session.tool_edit)(args)
+
+
+def test_temporary_vision_still_works_without_saving_an_edit_mask(monkeypatch):
+    from PIL import Image
+
+    session = harness.Session(ephemeral=True)
+    image = Image.new("RGB", (8, 8), "white")
+    monkeypatch.setitem(harness.SETTINGS, "llm", None)
+    def observe():
+        msgs = session.llm_messages()
+        assert any(p.get("type") == "image_url" for p in msgs[-1]["content"])
+        return {"action": "reply", "args": {"text": "White square."}}
+    monkeypatch.setattr(session, "ask_llm", observe)
+    monkeypatch.setattr(session, "fix_language", lambda text: text)
+    events = []
+    session.turn("Describe this image", [image], image, 1, events.append)
+    assert events[-2]["text"] == "White square." and not session.masks and events[0]["maskFor"] is None
+
+
+def test_regular_conversation_can_generate_and_edit_with_fake_engine(monkeypatch, tmp_path):
+    from PIL import Image
+
+    output = tmp_path / "engine.png"
+    Image.new("RGB", (8, 8), "white").save(output)
+    monkeypatch.setattr(harness, "COMFY_IN", str(tmp_path))
+    monkeypatch.setattr(harness, "image_model", lambda: {"engine": "qwen21"})
+    monkeypatch.setattr(harness, "build_instruct", lambda *a, **kw: {"test": True})
+    calls = []
+    def render(graph):
+        calls.append(graph)
+        return str(output)
+    monkeypatch.setattr(harness, "comfy_run", render)
+    session = harness.Session()
+    first, _ = session.tool_generate({"prompt": "ordinary"})
+    second, _ = session.tool_edit({"image": first, "prompt": "ordinary edit"})
+    assert len(calls) == 2 and session.images[second]["parent"] == first

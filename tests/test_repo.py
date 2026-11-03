@@ -11,7 +11,7 @@ def read(p, mode="r"):
         return f.read()
 
 
-@pytest.mark.parametrize("script", ["install.ps1", "start.ps1", "stop.ps1"])
+@pytest.mark.parametrize("script", ["install.ps1", "start.ps1", "stop.ps1", "sync-zip.ps1"])
 def test_powershell_scripts_are_ascii_without_bom(script):
     """A BOM or a non-ASCII byte breaks the one-line install `irm ... | iex`."""
     data = read(script, "rb")

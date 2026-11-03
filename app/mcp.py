@@ -30,7 +30,13 @@ def load():
 
 
 def save(cfg):
-    config.write_json(FILE, cfg)
+    specs = cfg.get("mcpServers")
+    if not isinstance(specs, dict) or any(not isinstance(spec, dict) for spec in specs.values()):
+        raise ValueError("invalid MCP server configuration")
+    with _lock:
+        config.write_json(FILE, cfg)
+        retired = _detach_obsolete(specs if enabled() else {})
+    _stop_async(retired)
 
 
 def _env(spec):
@@ -55,16 +61,21 @@ class Server:
         self.ids = itertools.count(1)
         self.pending = {}   # id -> [Event, message]
         self.lock = threading.Lock()
+        self.proc_lock = threading.Lock()
         self.stderr = collections.deque(maxlen=20)
         self.stopping = False
 
     # ---------------------------------------------------------------- lifecycle
     def start(self):
-        self.state, self.error, self.tools, self.stopping = "starting", "", [], False
+        if self.stopping:
+            return
+        self.state, self.error, self.tools = "starting", "", []
         threading.Thread(target=self._run, daemon=True, name=f"mcp-{self.name}").start()
 
     def _run(self):
         try:
+            if self.stopping:
+                return
             if not self.spec.get("url"):
                 self._spawn()
             self.request("initialize", {"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": CLIENT},
@@ -102,7 +113,15 @@ class Server:
         self.state, self.tools, self.session = "off", [], None
 
     def _kill(self):
-        p, self.proc = self.proc, None
+        with self.proc_lock:
+            p, self.proc = self.proc, None
+        self._kill_process(p)
+        for ev in list(self.pending.values()):
+            ev[1] = {"error": {"code": -32000, "message": "server stopped"}}
+            ev[0].set()
+
+    @staticmethod
+    def _kill_process(p):
         if p and p.poll() is None:
             if os.name == "nt":   # npx -> cmd -> node: the whole tree must go
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True,
@@ -113,9 +132,6 @@ class Server:
                 p.wait(5)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for ev in list(self.pending.values()):
-            ev[1] = {"error": {"code": -32000, "message": "server stopped"}}
-            ev[0].set()
 
     # ---------------------------------------------------------------- stdio transport
     def _spawn(self):
@@ -124,11 +140,20 @@ class Server:
             raise McpError("no command or url")
         env = _env(self.spec)
         exe = shutil.which(cmd, path=env.get("PATH")) or cmd   # npx -> npx.cmd on Windows
-        self.proc = subprocess.Popen([exe] + [str(a) for a in self.spec.get("args") or []], env=env,
-                                     cwd=self.spec.get("cwd") or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, creationflags=config.NOWIN)
-        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
-        threading.Thread(target=self._drain, args=(self.proc,), daemon=True).start()
+        if self.stopping:
+            raise McpError("server stopped")
+        proc = subprocess.Popen([exe] + [str(a) for a in self.spec.get("args") or []], env=env,
+                                cwd=self.spec.get("cwd") or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, creationflags=config.NOWIN)
+        with self.proc_lock:
+            if not self.stopping:
+                self.proc = proc
+                threading.Thread(target=self._read, args=(proc,), daemon=True).start()
+                threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
+                return
+        # stop() may have completed before Popen returned. Only this local handle owns that child.
+        self._kill_process(proc)
+        raise McpError("server stopped")
 
     def _read(self, proc):
         for line in proc.stdout:
@@ -153,6 +178,8 @@ class Server:
         if not p or p.poll() is not None:
             raise McpError("server is not running")
         with self.lock:
+            if self.stopping:
+                raise McpError("server stopped")
             p.stdin.write(json.dumps(msg, ensure_ascii=False).encode() + b"\n")
             p.stdin.flush()
 
@@ -195,6 +222,8 @@ class Server:
         except urllib.error.HTTPError as e:
             raise McpError(f"HTTP {e.code}: {e.read(300).decode('utf-8', 'replace')}") from None
         with r:
+            if self.stopping:
+                raise McpError("server stopped")
             self.session = r.headers.get("Mcp-Session-Id") or self.session
             if r.status == 202:
                 return
@@ -217,6 +246,8 @@ class Server:
                     self._dispatch(json.loads(body))
 
     def _send(self, msg, timeout=60):
+        if self.stopping:
+            raise McpError("server stopped")
         if self.spec.get("url"):
             self._post(msg, timeout)
         else:
@@ -224,6 +255,8 @@ class Server:
 
     # ---------------------------------------------------------------- JSON-RPC
     def request(self, method, params=None, timeout=60):
+        if self.stopping:
+            raise McpError("server stopped")
         rid = next(self.ids)
         ev = self.pending[rid] = [threading.Event(), None]
         try:
@@ -246,37 +279,71 @@ SERVERS = {}
 _lock = threading.Lock()
 
 
+def enabled():
+    import harness
+    return bool(harness.SETTINGS.get("mcp_on", True))
+
+
+def _stop_async(peers):
+    for peer in peers:
+        threading.Thread(target=peer.stop, daemon=True).start()
+
+
+def set_enabled(on):
+    import harness
+    with _lock:
+        if on == enabled():
+            return
+        harness.SETTINGS["mcp_on"] = on
+        retired = [] if on else _detach_obsolete({})
+    _stop_async(retired)
+    if on:
+        threading.Thread(target=start_all, daemon=True).start()
+
+
+def _detach_obsolete(cfg):
+    """Called under the registry lock. Retire identities synchronously, shut down transports outside the lock."""
+    retired = []
+    for name, peer in list(SERVERS.items()):
+        spec = cfg.get(name)
+        if (not isinstance(spec, dict) or spec.get("disabled") or
+                {k: v for k, v in spec.items() if k != "disabled"} != {k: v for k, v in peer.spec.items() if k != "disabled"}):
+            peer.stopping = True
+            retired.append(SERVERS.pop(name))
+    return retired
+
+
 def start_all():
     """Starts every enabled server of mcp.json in the background; stops removed, disabled or changed ones."""
-    cfg = load()["mcpServers"]
     with _lock:
-        for name in list(SERVERS):
-            spec = cfg.get(name)
-            if not spec or spec.get("disabled") or {k: v for k, v in spec.items() if k != "disabled"} != \
-                    {k: v for k, v in SERVERS[name].spec.items() if k != "disabled"}:
-                SERVERS.pop(name).stop()
+        cfg = load()["mcpServers"] if enabled() else {}
+        retired = _detach_obsolete(cfg)
         for name, spec in cfg.items():
             if name not in SERVERS and isinstance(spec, dict) and not spec.get("disabled"):
                 SERVERS[name] = Server(name, spec)
                 SERVERS[name].start()
+    for peer in retired:
+        peer.stop()
 
 
 def restart(name):
-    spec = load()["mcpServers"].get(name)
     with _lock:
+        spec = load()["mcpServers"].get(name)
         old = SERVERS.pop(name, None)
         if old:
-            old.stop()
-        if spec and not spec.get("disabled"):
+            old.stopping = True
+        if enabled() and spec and not spec.get("disabled"):
             SERVERS[name] = Server(name, spec)
             SERVERS[name].start()
+    if old:
+        old.stop()
 
 
 def stop_all():
     with _lock:
-        for s in SERVERS.values():
-            s.stop()
-        SERVERS.clear()
+        retired = _detach_obsolete({})
+    for peer in retired:
+        peer.stop()
 
 
 def status():
@@ -303,9 +370,12 @@ def wait_ready(timeout=START_TIMEOUT):
 
 def tools():
     """Flat list of ready tools: [{name: "server__tool", server, tool, description, inputSchema}]."""
-    return [{"name": f"{s.name}{SEP}{t['name']}", "server": s.name, "tool": t["name"],
-             "description": t["description"], "inputSchema": t["inputSchema"]}
-            for s in list(SERVERS.values()) if s.state == "ready" for t in s.tools]
+    with _lock:
+        if not enabled():
+            return []
+        return [{"name": f"{s.name}{SEP}{t['name']}", "server": s.name, "tool": t["name"],
+                 "description": t["description"], "inputSchema": t["inputSchema"]}
+                for s in SERVERS.values() if s.state == "ready" for t in s.tools]
 
 
 def _content(result):
@@ -329,15 +399,20 @@ def _content(result):
 
 def call(qualified_name, arguments=None, timeout=60):
     """Runs a tool ("server__tool") and returns its result as text (raises McpError when unavailable)."""
-    for name in sorted(SERVERS, key=len, reverse=True):   # server names may contain "__" themselves
-        if qualified_name.startswith(name + SEP):
-            s, tool = SERVERS[name], qualified_name[len(name) + len(SEP):]
-            break
-    else:
-        raise McpError(f"unknown tool {qualified_name}")
-    if s.state != "ready":
-        raise McpError(f"MCP server {s.name} is {s.state}" + (f": {s.error}" if s.error else ""))
-    return _content(s.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout))
+    with _lock:
+        if not enabled():
+            raise McpError("MCP is disabled")
+        # Qualified names can themselves contain the separator. Require exactly one advertised match.
+        matches = [(s, t["name"]) for s in SERVERS.values() if s.state == "ready" for t in s.tools
+                   if f"{s.name}{SEP}{t['name']}" == qualified_name]
+        if len(matches) != 1:
+            raise McpError(f"unknown tool {qualified_name}")
+        s, tool = matches[0]
+    response = s.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout)
+    with _lock:
+        if not enabled() or SERVERS.get(s.name) is not s:
+            raise McpError("MCP authorization changed during the call")
+    return _content(response)
 
 
 def _compact(schema):

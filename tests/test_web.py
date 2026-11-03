@@ -1,5 +1,6 @@
 """Web search parsing, page text extraction, SSRF guard (no network except the optional live test)."""
-import base64, os
+import base64, io, os, socket, ssl
+from unittest.mock import Mock
 
 import pytest
 
@@ -75,18 +76,72 @@ def test_ssrf_guard(url):
         web.fetch(url)
 
 
+def transport(monkeypatch, addresses, response):
+    """Exercise http.client's request and response paths without any real network I/O."""
+    answers = iter(addresses)
+    dns = Mock(side_effect=lambda host, port, **kw: [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))
+                                                    for ip in next(answers)])
+    stream = Mock()
+    stream.makefile.return_value = io.BytesIO(response)
+    tls = Mock()
+    tls.wrap_socket.return_value = stream
+    monkeypatch.setattr(web.socket, "getaddrinfo", dns)
+    monkeypatch.setattr(web.socket, "socket", Mock(return_value=stream))
+    monkeypatch.setattr(web.ssl, "create_default_context", Mock(return_value=tls))
+    return dns, stream, tls
+
+
 def test_redirect_to_private_address_is_refused(monkeypatch):
-    import urllib.error, email.message
-
-    def fake_open(req, timeout):
-        h = email.message.Message()
-        h["Location"] = "http://127.0.0.1:8080/secret"
-        raise urllib.error.HTTPError(req.full_url, 302, "Found", h, None)
-
-    monkeypatch.setattr(web, "check_url", lambda u: u if "127.0.0.1" not in u else (_ for _ in ()).throw(ValueError("private")))
-    monkeypatch.setattr(web._opener, "open", fake_open)
+    dns, stream, _ = transport(monkeypatch, [["1.1.1.1"], ["127.0.0.1"]],
+                               b"HTTP/1.1 302 Found\r\nLocation: /second\r\nContent-Length: 0\r\n\r\n")
     with pytest.raises(ValueError, match="private"):
         web.fetch("https://public.example/")
+    assert dns.call_count == 2  # including a relative redirect to the same host
+    stream.connect.assert_called_once_with(("1.1.1.1", 443))
+
+
+def test_pinned_https_keeps_original_tls_and_http_identity(monkeypatch):
+    dns, stream, tls = transport(monkeypatch, [["1.1.1.1"], ["127.0.0.1"]],
+                                 b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+    monkeypatch.setenv("https_proxy", "http://untrusted.example:1234")
+    assert web.fetch("https://public.example:8443/test?q=ok#fragment")["text"] == "hello"
+    assert dns.call_count == 1
+    stream.connect.assert_called_once_with(("1.1.1.1", 8443))
+    tls.wrap_socket.assert_called_once_with(stream, server_hostname="public.example")
+    raw = stream.sendall.call_args.args[0]
+    assert b"Host: public.example:8443\r\n" in raw and raw.startswith(b"GET /test?q=ok HTTP/1.1\r\n")
+
+
+def test_mixed_addresses_are_rejected_before_connecting(monkeypatch):
+    _, stream, _ = transport(monkeypatch, [["1.1.1.1", "10.0.0.1"]], b"")
+    with pytest.raises(ValueError, match="private"):
+        web.fetch("http://mixed.example")
+    stream.connect.assert_not_called()
+
+
+@pytest.mark.parametrize("ip", ["::ffff:127.0.0.1", "64:ff9b::7f00:1", "fec0::1", "2002:7f00:1::1"])
+def test_rejects_local_and_translated_local_ipv6(monkeypatch, ip):
+    _, stream, _ = transport(monkeypatch, [[ip]], b"")
+    with pytest.raises(ValueError, match="private"):
+        web.fetch("http://mixed.example")
+    stream.connect.assert_not_called()
+
+
+def test_pinned_cert_failure_never_sends_request(monkeypatch):
+    _, stream, tls = transport(monkeypatch, [["1.1.1.1"]], b"")
+    tls.wrap_socket.side_effect = ssl.SSLCertVerificationError("test invalid certificate")
+    with pytest.raises(ssl.SSLCertVerificationError):
+        web.fetch("https://public.example")
+    stream.sendall.assert_not_called()
+    stream.close.assert_called_once()
+
+
+def test_configured_local_search_engine_cannot_redirect_to_other_private_origin(monkeypatch):
+    _, stream, _ = transport(monkeypatch, [["127.0.0.1"], ["127.0.0.1"]],
+                             b"HTTP/1.1 302 Found\r\nLocation: http://other.example/\r\nContent-Length: 0\r\n\r\n")
+    with pytest.raises(ValueError, match="private"):
+        web._searx("hello", 1, "http://search.example:8888")
+    stream.connect.assert_called_once_with(("127.0.0.1", 8888))
 
 
 def test_results_block():

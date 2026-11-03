@@ -69,6 +69,22 @@ def test_agent_denied_by_level(tmp_path):
     assert [e["type"] for e in evs] == ["ctool", "cresult"]
 
 
+def test_stale_card_cannot_execute_or_restore_always_after_level_change(tmp_path):
+    import server
+    s = _session("ask")
+    target = tmp_path / "stale.txt"
+
+    def revoke(event):
+        if event["type"] == "approve":
+            assert s.approve(event["id"], "always")
+            server.apply_config(s, {"computer": "off"})
+            server.apply_config(s, {"computer": "ask"})
+            assert not s.approve(event["id"], "once")
+
+    s._on_computer(_T(), {"tool": "write", "path": str(target), "content": "blocked"}, revoke)
+    assert not target.exists() and not s.config["computer_allow"]
+
+
 def test_agent_approval_flow(tmp_path):
     s, evs = _session("ask"), []
     target = tmp_path / "ok.txt"

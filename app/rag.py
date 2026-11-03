@@ -4,7 +4,7 @@ Files are read with attach.py (PDFs page by page so each chunk knows its page), 
 embedded with the memory model (e5-small) when it is installed, and stored in data/knowledge.db.
 Search is hybrid (cosine + BM25-like keywords) and falls back to keywords only without the model.
 """
-import json, math, os, re, sqlite3, threading, time
+import contextlib, contextvars, hashlib, heapq, json, os, re, sqlite3, threading, time, uuid
 
 import attach
 import config
@@ -14,6 +14,72 @@ CHUNK, OVERLAP = 900, 150
 MAX_CHARS = 5_000_000      # per document
 _db = None
 _lock = threading.RLock()
+_dispatcher = None
+MAX_PENDING_BYTES = 512 * 2**20
+MAX_PENDING_FILES = 128
+admission = contextvars.ContextVar("rag_request_admission", default=contextlib.nullcontext)
+
+
+@contextlib.contextmanager
+def guard_request(refs, selection):
+    """Bind only this payload's citations; each transport attempt checks them at dispatch."""
+    if not refs:
+        yield
+        return
+
+    @contextlib.contextmanager
+    def admit():
+        with selection() as ids, _lock:
+            if len(live_hits(refs, ids)) != len(refs):
+                raise ValueError("Les sources ont changé avant l’envoi. Relancez la demande.")
+            yield  # the caller releases the locks as soon as it opens the response
+
+    token = admission.set(admit)
+    try:
+        yield
+    finally:
+        admission.reset(token)
+
+
+def _next_id(conn):
+    # Legacy rowids were positive and may refer to a deleted object. Never allocate in that domain.
+    conn.execute("UPDATE knowledge_sequence SET value=value-1")
+    return conn.execute("SELECT value FROM knowledge_sequence").fetchone()[0]
+
+
+def _upgrade(conn):
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 2:
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("CREATE TABLE knowledge_sequence(value INTEGER NOT NULL)")
+        conn.execute("INSERT INTO knowledge_sequence VALUES(0)")
+        conn.execute("ALTER TABLE collections ADD COLUMN folder TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE collections ADD COLUMN sync_status TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE collections ADD COLUMN last_sync REAL")
+        conn.execute("ALTER TABLE documents ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE documents ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE documents ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE documents ADD COLUMN sync_stamp TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE documents SET revision=lower(hex(randomblob(16)))")
+        # Re-select collections once: a legacy permission cannot distinguish the original owner of a reused ID.
+        for cid, name, created in conn.execute("SELECT id,name,created FROM collections").fetchall():
+            fresh = _next_id(conn)
+            conn.execute("INSERT INTO collections(id,name,created) VALUES(?,?,?)", (fresh, name, created))
+            conn.execute("UPDATE documents SET collection_id=? WHERE collection_id=?", (fresh, cid))
+            conn.execute("DELETE FROM collections WHERE id=?", (cid,))
+        conn.execute("CREATE TABLE pending_documents(doc_id INTEGER PRIMARY KEY REFERENCES documents(id) "
+                     "ON DELETE CASCADE, body BLOB NOT NULL, mime TEXT NOT NULL)")
+        conn.execute("CREATE INDEX documents_collection ON documents(collection_id)")
+        conn.execute("CREATE VIRTUAL TABLE chunk_search USING fts5(text, content='chunks', content_rowid='id')")
+        conn.execute("INSERT INTO chunk_search(chunk_search) VALUES('rebuild')")
+        conn.execute("CREATE TRIGGER chunks_insert AFTER INSERT ON chunks BEGIN "
+                     "INSERT INTO chunk_search(rowid,text) VALUES(new.id,new.text); END")
+        conn.execute("CREATE TRIGGER chunks_delete AFTER DELETE ON chunks BEGIN "
+                     "INSERT INTO chunk_search(chunk_search,rowid,text) VALUES('delete',old.id,old.text); END")
+        conn.execute("UPDATE documents SET state='error', error='indexation interrompue, ajoute le fichier à nouveau' "
+                     "WHERE state='indexing'")
+        conn.execute("PRAGMA user_version=2")
 
 
 def db():
@@ -33,10 +99,12 @@ def db():
             CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES documents(id)
                 ON DELETE CASCADE, ord INTEGER, page INTEGER, text TEXT, vec TEXT);
             CREATE INDEX IF NOT EXISTS chunks_doc ON chunks(doc_id);""")
-            # documents left half-indexed by a previous run cannot resume (their bytes are gone)
-            _db.execute("UPDATE documents SET state='error', error='indexation interrompue, ajoute le fichier à nouveau' "
-                        "WHERE state='indexing'")
-            _db.commit()
+            try:
+                _upgrade(_db)
+            except Exception:
+                _db.close()
+                _db = None
+                raise
         return _db
 
 
@@ -52,6 +120,14 @@ def _write(sql, args=()):
         return c
 
 
+def existing_collections(ids):
+    ids = sorted(set(ids))
+    if not ids:
+        return []
+    return [r["id"] for r in _read("SELECT id FROM collections WHERE id IN (" + ",".join("?" for _ in ids) +
+                                   ") ORDER BY id", ids)]
+
+
 # -- collections
 def collections():
     rows = _read("SELECT d.*, (SELECT COUNT(*) FROM chunks WHERE doc_id=d.id) AS chunks FROM documents d "
@@ -60,13 +136,16 @@ def collections():
     for c in _read("SELECT * FROM collections ORDER BY created"):
         docs = [{k: r[k] for k in ("id", "name", "kind", "size", "chunks", "state", "error", "added")}
                 for r in rows if r["collection_id"] == c["id"]]
-        out.append({"id": c["id"], "name": c["name"], "docs": docs})
+        out.append({k: c[k] for k in ("id", "name", "folder", "sync_status", "last_sync")} | {"docs": docs})
     return out
 
 
 def create_collection(name):
-    return _write("INSERT INTO collections(name,created) VALUES(?,?)",
-                  ((name or "").strip() or "Sans titre", time.time())).lastrowid
+    with _lock, db() as conn:
+        cid = _next_id(conn)
+        conn.execute("INSERT INTO collections(id,name,created) VALUES(?,?,?)",
+                     (cid, (name or "").strip() or "Sans titre", time.time()))
+        return cid
 
 
 def rename_collection(cid, name):
@@ -79,17 +158,69 @@ def delete_collection(cid):
 
 
 # -- documents
-def add_document(collection_id, name, data, mime=""):
-    """Registers the file and indexes it in the background; state goes 'indexing' -> 'ready' | 'error'."""
-    if not _read("SELECT 1 FROM collections WHERE id=?", (collection_id,)):
-        raise ValueError("collection inconnue")
-    did = _write("INSERT INTO documents(collection_id,name,kind,size,added,state) VALUES(?,?,?,?,?,?)",
-                 (collection_id, name, attach.kind_of(name, mime), len(data), time.time(), "indexing")).lastrowid
+def add_document(collection_id, name, data, mime="", *, source="", folder=None, sync_stamp=""):
     if len(data) > attach.MAX_BYTES:
-        _write("UPDATE documents SET state='error', error=? WHERE id=?", ("fichier trop gros (200 Mo max.)", did))
-    else:
-        threading.Thread(target=_ingest, args=(did, name, data, mime), daemon=True).start()
+        raise ValueError("fichier trop gros (200 Mo max.)")
+    fingerprint = hashlib.sha256(data).hexdigest()
+    with _lock, db() as conn:
+        coll = conn.execute("SELECT folder FROM collections WHERE id=?", (collection_id,)).fetchone()
+        if not coll or (folder is not None and folder != coll["folder"]):
+            raise ValueError("collection ou dossier modifié")
+        previous = conn.execute("SELECT id,fingerprint,state FROM documents WHERE collection_id=? AND source=? "
+                                "AND name=? ORDER BY added DESC LIMIT 1", (collection_id, source, name)).fetchone()
+        if previous and previous["fingerprint"] == fingerprint and previous["state"] != "error":
+            return previous["id"]
+        if previous:
+            conn.execute("DELETE FROM documents WHERE id=?", (previous["id"],))
+        count, used = conn.execute("SELECT COUNT(*),COALESCE(SUM(length(body)),0) FROM pending_documents").fetchone()
+        if count >= MAX_PENDING_FILES or used + len(data) > MAX_PENDING_BYTES:
+            raise ValueError("file d’indexation pleine, réessayez après les imports en cours")
+        did = _next_id(conn)
+        conn.execute("INSERT INTO documents(id,collection_id,name,kind,size,added,state,revision,source,fingerprint,sync_stamp) "
+                     "VALUES(?,?,?,?,?,?,'indexing',?,?,?,?)",
+                     (did, collection_id, name, attach.kind_of(name, mime), len(data), time.time(),
+                      uuid.uuid4().hex, source, fingerprint, sync_stamp))
+        conn.execute("INSERT INTO pending_documents VALUES(?,?,?)", (did, data, mime))
+    resume()
     return did
+
+
+def resume():
+    global _dispatcher
+    with _lock:
+        if _dispatcher is None and db().execute("SELECT 1 FROM pending_documents LIMIT 1").fetchone():
+            _dispatcher = threading.Thread(target=_drain, daemon=True, name="knowledge-ingest")
+            try:
+                _dispatcher.start()
+            except RuntimeError:
+                _dispatcher = None
+                raise
+
+
+def _drain():
+    global _dispatcher
+    while True:
+        with _lock:
+            row = db().execute("SELECT doc_id FROM pending_documents ORDER BY doc_id DESC LIMIT 1").fetchone()
+            if row is None:
+                _dispatcher = None
+                return
+        done = threading.Event()
+        if attach.start_reader(_read_pending, row["doc_id"], done):
+            done.wait()
+        else:
+            time.sleep(0.1)
+
+
+def _read_pending(did, done):
+    try:
+        rows = _read("SELECT d.name,p.body,p.mime FROM pending_documents p JOIN documents d ON d.id=p.doc_id "
+                     "WHERE d.id=?", (did,))
+        if rows:
+            r = rows[0]
+            _ingest(did, r["name"], r["body"], r["mime"])
+    finally:
+        done.set()
 
 
 def delete_document(did):
@@ -161,84 +292,120 @@ def _ingest(did, name, data, mime):
                 vecs = None
                 break
             vecs += v
-        with _lock:
+        with _lock, db() as conn:
             if not db().execute("SELECT 1 FROM documents WHERE id=?", (did,)).fetchone():
                 return  # deleted while indexing
             db().executemany("INSERT INTO chunks(doc_id,ord,page,text,vec) VALUES(?,?,?,?,?)",
                              [(did, i, p, c, json.dumps(vecs[i]) if vecs else None) for i, (p, c) in enumerate(pieces)])
             db().execute("UPDATE documents SET state='ready', chars=? WHERE id=?", (total, did))
-            db().commit()
+            conn.execute("DELETE FROM pending_documents WHERE doc_id=?", (did,))
     except Exception as e:
-        _write("UPDATE documents SET state='error', error=? WHERE id=?", (str(e) or e.__class__.__name__, did))
+        with _lock, db() as conn:
+            conn.execute("UPDATE documents SET state='error', error=? WHERE id=?", (str(e) or e.__class__.__name__, did))
+            conn.execute("DELETE FROM pending_documents WHERE doc_id=?", (did,))
 
 
 def reindex():
-    """Embeds chunks stored before the embedding model was installed. Returns how many."""
-    rows = _read("SELECT id,text FROM chunks WHERE vec IS NULL")
-    if not rows or not memory.EMB.ready():
+    """Backfill a bounded batch; maintenance continues on subsequent passes."""
+    if not memory.EMB.ready():
         return 0
-    for i in range(0, len(rows), 32):
-        part = rows[i:i + 32]
-        vecs = memory.EMB.encode([r["text"] for r in part])
-        if not vecs:
-            return i
-        with _lock:
-            db().executemany("UPDATE chunks SET vec=? WHERE id=?", [(json.dumps(v), r["id"]) for r, v in zip(part, vecs)])
-            db().commit()
-    return len(rows)
+    part = _read("SELECT id,doc_id,text FROM chunks WHERE vec IS NULL LIMIT 32")
+    if not part:
+        return 0
+    vectors = memory.EMB.encode([r["text"] for r in part])
+    if not vectors:
+        return 0
+    with _lock, db() as conn:
+        conn.executemany("UPDATE chunks SET vec=? WHERE id=? AND doc_id=? AND vec IS NULL",
+                         [(json.dumps(v), r["id"], r["doc_id"]) for r, v in zip(part, vectors)])
+    return len(part)
 
 
-# -- search
+def live_hits(hits, selected_ids):
+    """Rebuild cached passages from the current index. Old caches without provenance expire."""
+    selected = set(selected_ids)
+    live = []
+    with _lock:
+        for number, hit in enumerate(hits, 1):
+            if hit.get("collection_id") not in selected or not hit.get("revision"):
+                continue
+            row = db().execute("SELECT c.text,c.page,d.name AS doc,l.name AS collection FROM chunks c "
+                               "JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id "
+                               "WHERE c.id=? AND d.id=? AND d.collection_id=? AND d.revision=? AND d.state='ready'",
+                               (hit.get("chunk_id"), hit.get("doc_id"), hit["collection_id"], hit["revision"])).fetchone()
+            if row:
+                live.append(hit | dict(row) | {"source_number": hit.get("source_number", number)})
+    return live
+
+
 def _terms(t):
     return [w for w in memory.WORD.findall(t.lower()) if w not in memory.STOP]
 
 
 def search(query, collection_ids=None, k=6):
-    """Best chunks: [{doc_id, doc, page, text, score, collection}], hybrid cosine + BM25, near-duplicates removed."""
-    sql = ("SELECT c.id, c.doc_id, c.page, c.text, c.vec, d.name AS doc, l.name AS collection FROM chunks c "
-           "JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id WHERE d.state='ready'")
-    args = []
-    if collection_ids:
-        ids = [int(i) for i in collection_ids]
-        sql += f" AND d.collection_id IN ({','.join('?' * len(ids))})"
-        args = ids
-    rows = [dict(r) for r in _read(sql, args)]
-    if not rows or not query.strip():
+    """Union indexed keyword candidates with the nearest vectors, including lexical misses."""
+    if not query.strip() or k <= 0:
         return []
-    # BM25 keywords
-    q = set(_terms(query))
-    toks = [_terms(r["text"]) for r in rows]
-    avg = sum(map(len, toks)) / len(toks) or 1
-    df = {w: sum(1 for t in toks if w in t) for w in q}
-    kw = []
-    for t in toks:
-        s = 0.0
-        for w in q:
-            tf = t.count(w)
-            if tf:
-                idf = math.log(1 + (len(toks) - df[w] + 0.5) / (df[w] + 0.5))
-                s += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * len(t) / avg))
-        kw.append(s)
-    top = max(kw) or 1
-    qv = memory.EMB.encode([query], query=True) if any(r["vec"] for r in rows) else None
-    for r, s in zip(rows, kw):
-        s /= top
-        if qv and r["vec"]:
-            cos = sum(a * b for a, b in zip(qv[0], json.loads(r["vec"])))
-            r["score"] = 0.7 * max(0.0, min(1.0, (cos - 0.75) / 0.2)) + 0.3 * s  # e5 cosines live in ~0.75..0.95
-        else:
-            r["score"] = s
-    rows.sort(key=lambda r: -r["score"])
-    hits, seen = [], []
+    ids = [] if collection_ids is None else list(dict.fromkeys(map(int, collection_ids)))
+    if collection_ids is not None and not ids:
+        return []
+    scope = " AND d.collection_id IN (" + ",".join("?" for _ in ids) + ")" if ids else ""
+    cols = ("c.id AS chunk_id,c.doc_id,c.page,c.text,c.vec,d.name AS doc,l.name AS collection,"
+            "d.collection_id,d.revision")
+    joins = (" FROM chunks c JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id ")
+    terms = list(dict.fromkeys(_terms(query)))[:32]
+    limit = max(96, k * 8)
+    lexical = []
+    if terms:
+        expr = " OR ".join('"' + t + '"' for t in terms)
+        lexical = _read("SELECT " + cols + ", rank AS kw" + joins + " JOIN chunk_search ON chunk_search.rowid=c.id "
+                        "WHERE chunk_search MATCH ? AND d.state='ready'" + scope + " ORDER BY rank LIMIT ?",
+                        [expr, *ids, limit])
+    candidates = {r["chunk_id"]: dict(r) for r in lexical}
+    has_vec = (" WHERE d.state='ready' AND c.vec IS NOT NULL" + scope)
+    qv = None
+    if memory.EMB.ready() and _read("SELECT 1" + joins + has_vec + " LIMIT 1", ids):
+        qv = memory.EMB.encode([query], query=True)
+    if qv:
+        # Page through vectors only. Passage texts are loaded for shortlisted IDs.
+        best, last_id = [], 0
+        while True:
+            batch = _read("SELECT c.id,c.vec" + joins + has_vec + " AND c.id>? ORDER BY c.id LIMIT 128", [*ids, last_id])
+            if not batch:
+                break
+            for r in batch:
+                sim = sum(a * b for a, b in zip(qv[0], json.loads(r["vec"])))
+                item = (sim, r["id"])
+                if len(best) < limit:
+                    heapq.heappush(best, item)
+                elif item > best[0]:
+                    heapq.heapreplace(best, item)
+            last_id = batch[-1]["id"]
+        missing = [cid for _, cid in best if cid not in candidates]
+        if missing:
+            marks = ",".join("?" for _ in missing)
+            for r in _read("SELECT " + cols + ",0 AS kw" + joins + has_vec + f" AND c.id IN ({marks})", [*ids, *missing]):
+                candidates[r["chunk_id"]] = dict(r)
+    if not candidates:
+        return []
+    rows = list(candidates.values())
+    top = max(-r["kw"] for r in rows) or 1
     for r in rows:
+        score = -r.pop("kw") / top
+        vec = r.pop("vec")
+        if qv and vec:
+            cos = sum(a * b for a, b in zip(qv[0], json.loads(vec)))
+            score = 0.7 * max(0.0, min(1.0, (cos - 0.75) / 0.2)) + 0.3 * score
+        r["score"] = round(score, 4)
+    hits, seen = [], []
+    for r in sorted(rows, key=lambda row: -row["score"]):
         if r["score"] <= 0 or len(hits) >= k:
             break
-        t = set(_terms(r["text"]))
-        if any(len(t & s) / max(1, len(t | s)) > 0.8 for s in seen):
-            continue  # same passage twice (overlap, duplicated file)
-        seen.append(t)
-        hits.append({"doc_id": r["doc_id"], "doc": r["doc"], "page": r["page"], "text": r["text"],
-                     "score": round(r["score"], 4), "collection": r["collection"]})
+        tokens = set(_terms(r["text"]))
+        if any(len(tokens & prev) / max(1, len(tokens | prev)) > 0.8 for prev in seen):
+            continue
+        seen.append(tokens)
+        hits.append(r)
     return hits
 
 
@@ -246,7 +413,7 @@ def context_block(hits):
     """Numbered sources for the LLM, with the instruction to cite them as [1], [2]."""
     if not hits:
         return ""
-    src = "\n\n".join(f"[{i}] {h['doc']}" + (f" (p. {h['page']})" if h.get("page") else "") + f": {h['text']}"
+    src = "\n\n".join(f"[{h.get('source_number', i)}] {h['doc']}" + (f" (p. {h['page']})" if h.get("page") else "") + f": {h['text']}"
                       for i, h in enumerate(hits, 1))
     return ("Excerpts from the user's knowledge base:\n\n" + src +
             "\n\nUse these sources when they are relevant. Cite each fact you take from them with its number in square "

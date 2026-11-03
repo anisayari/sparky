@@ -94,3 +94,16 @@ def test_chat_routes_to_the_active_cloud_model(clean_cloud, mock_provider, monke
     assert harness.cloud_model() is m
     assert harness.chat_once({"messages": [{"role": "user", "content": "x"}], "max_tokens": 10}) == "Bonjour"
     assert "".join(t for t, _ in harness.chat_deltas({"messages": [{"role": "user", "content": "x"}]})) == "Bonjour"
+
+
+def test_plain_chat_keeps_the_latest_input_and_uses_available_tools(monkeypatch, tmp_path):
+    import config
+    monkeypatch.setattr(config, "COMFY_DIR", str(tmp_path / "missing-studio"))
+    monkeypatch.setattr(config, "EXTERNAL_COMFY", False)
+    session = harness.Session(ephemeral=True)
+    session.lang = "French"
+    session.history = [{"role": "user", "text": "Give the capital of France.", "raw": "Give the capital of France."}]
+    messages = session.llm_messages()
+    assert '"action":"reply"' in messages[0]["content"]
+    assert "Current image model:" not in messages[0]["content"]
+    assert messages[-1]["content"] == [{"type": "text", "text": "Give the capital of France."}]

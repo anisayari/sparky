@@ -28,8 +28,8 @@ body.closed #side{margin-left:-260px}
 .cv{display:flex;align-items:center;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:14px;color:var(--txt2)}
 .cv:hover{background:var(--hov)}.cv.on{background:var(--s2);color:var(--txt)}
 .cv span{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.cv button{display:none;color:var(--mut);width:24px;height:24px;border-radius:6px;place-items:center}
-.cv:hover button{display:grid}.cv button:hover{color:var(--bad)}
+.cv button:not(.cvt){display:grid;opacity:0;color:var(--mut);width:24px;height:24px;border-radius:6px;place-items:center}
+.cv:hover button,.cv:focus-within button{opacity:1}.cv button:not(.cvt):hover{color:var(--bad)}
 #side .bot{padding:8px}
 
 /* ---- zone principale */
@@ -476,7 +476,7 @@ body.botmode #scroll,body.botmode footer,body.botmode #art{display:none!importan
 .mmd{background:var(--s0);border:1px solid var(--line);border-radius:12px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center}
 .mmd pre{text-align:left;margin:0;font:12px ui-monospace,Consolas,monospace;color:var(--mut);white-space:pre-wrap}
 .mmd svg{max-width:100%;height:auto}
-sup.cite{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;margin:0 1px;border-radius:8px;background:var(--acc-bg);color:var(--acc-fg);font-size:10.5px;font-weight:600;cursor:pointer;vertical-align:super;line-height:1}
+button.cite{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;margin:0 1px;border-radius:8px;background:var(--acc-bg);color:var(--acc-fg);font-size:10.5px;font-weight:600;cursor:pointer;vertical-align:super;line-height:1}
 .hljs-keyword,.hljs-selector-tag,.hljs-built_in,.hljs-literal{color:#c792ea}.hljs-string,.hljs-attr-value,.hljs-template-tag{color:#9ece6a}
 .hljs-number,.hljs-symbol{color:#ff9e64}.hljs-comment,.hljs-quote{color:#7a7f93;font-style:italic}.hljs-title,.hljs-section,.hljs-function .hljs-title{color:#7aa2f7}
 .hljs-attr,.hljs-attribute,.hljs-property,.hljs-variable,.hljs-params{color:#73daca}.hljs-type,.hljs-class .hljs-title{color:#e0af68}.hljs-meta,.hljs-tag,.hljs-name{color:#89ddff}
@@ -529,7 +529,7 @@ sup.cite{display:inline-grid;place-items:center;min-width:16px;height:16px;paddi
 #list .h.fold{cursor:pointer}#list .h.fold:hover{color:var(--txt)}
 .cv .pin{color:var(--warn);margin-right:6px;display:inline-flex}
 .cv small{display:block;color:var(--dim);font-size:11.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.cv .cvt{flex:1;min-width:0;overflow:hidden}.cv .cvt>span{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.cv .cvt{background:transparent;color:inherit;text-align:left;flex:1;min-width:0;overflow:hidden}.cv .cvt>span{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #menu{position:fixed;z-index:30;background:var(--s2);border:1px solid var(--line);border-radius:10px;padding:4px;box-shadow:0 10px 30px #0007;display:none;min-width:200px;max-height:70vh;overflow:auto}
 #menu button,#menu label{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border-radius:7px;font-size:13.5px;text-align:left;color:var(--txt);cursor:pointer}
 #menu button:hover,#menu label:hover{background:var(--hov)}#menu .bad{color:var(--bad)}
@@ -753,6 +753,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
     </div>
   </div></div>
   <footer>
+    <div id="reviewNotice" hidden>Synthèse en lecture seule. Pour poursuivre, créez une discussion depuis un message.</div>
     <div id="box">
       <div id="att"></div>
       <div id="row">
@@ -763,6 +764,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
           <canvas id="wave"></canvas><span id="recT">0:00</span>
           <button id="recStop" title="Arrêter et transcrire"><span class="sq"></span></button></div>
         <button class="ib" id="mic" title="Dicter (hors ligne)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+        <button id="stopTurn" hidden type="button" aria-label="Arrêter la génération">■ Arrêter</button>
         <button id="send" title="Envoyer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
       </div>
     <div id="tools"></div><div id="slash"></div>
@@ -776,7 +778,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
     <span id="artT"></span><span id="artLive"><span class="spin" style="width:11px;height:11px;border-color:var(--warn);border-right-color:transparent"></span>écrit…</span>
     <select id="artV" title="Version"></select>
     <div id="artTabs"><button data-t="view" class="on">Aperçu</button><button data-t="code">Code</button><button data-t="run" id="artRunTab">Console</button></div>
-    <button class="ib" id="artRun" title="Lancer le programme"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"/></svg></button>
+    <button class="ib" id="artRun" title="Vérifier le projet"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 12 5 5L20 6"/></svg></button>
     <button class="ib" id="artCopy" title="Copier le code"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
     <button class="ib" id="artDl" title="Télécharger"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 20h16"/></svg></button>
     <button class="ib" id="artTab" title="Ouvrir dans un nouvel onglet"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></button>
@@ -805,7 +807,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
     <div><label>CFG</label><input type="number" id="cfg" min="1" max="15" step="0.5"></div>
     <div><label>Essais max de l'agent</label><input type="number" id="maxs" min="1" max="12"></div>
   </div>
-  <div class="f" style="margin-top:14px"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="autoT"><span>Tester et corriger automatiquement les projets</span></label></div>
+  <div class="f" style="margin-top:14px"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="autoT"><span>Vérifier et corriger automatiquement le code des projets</span></label></div>
   <div class="acts" style="margin-top:18px"><button id="setx">Annuler</button><button class="go" id="setok">Enregistrer</button></div>
 </div></div>
 <div id="pick"></div>
@@ -927,6 +929,12 @@ const EN={
  'Répondre à partir de tes documents':'Answer from your documents','Par défaut (Sparky)':'Default (Sparky)','Gérer les assistants…':'Manage assistants…',
  'Répondre à partir de':'Answer from','Aucune collection pour l’instant.':'No collection yet.','Ajouter des documents…':'Add documents…',
  'Résultats':'Results','Aucun résultat':'No results','Épinglées':'Pinned','Renommer':'Rename','Épingler':'Pin','Désépingler':'Unpin',
+ 'Partager une copie JSON (sources internes retirées)':'Share a JSON copy (internal sources removed)',
+ 'Sauvegarder ce fil avec ses sources…':'Back up this chat with its sources…',
+ 'Cette sauvegarde locale contient les passages cités et peut révéler le contenu de vos documents. La restauration redemande les autorisations. Continuer ?':'This local backup includes cited passages and can disclose your documents. Restoring it asks for permissions again. Continue?',
+ 'Impossible d’ouvrir la conversation':'Could not open the conversation',
+ 'Modifier le dossier':'Change folder','Synchroniser un dossier':'Sync a folder','Synchronisation en attente':'Sync pending',
+ 'Chemin complet du dossier local à synchroniser. Les fichiers ajoutés ou modifiés seront indexés. Videz le chemin pour retirer les documents synchronisés.':'Full path of the local folder to sync. Added or changed files will be indexed. Clear the path to remove synced documents.',
  'Déplacer dans un dossier…':'Move to a folder…','Exporter (JSON)':'Export (JSON)','Exporter (Markdown)':'Export (Markdown)',
  'Nouveau nom :':'New name:','Nom du dossier (vide pour le retirer) :':'Folder name (empty to remove it):','Import impossible : ':'Import failed: ',
  'Un assistant = un rôle (instructions), des documents et l’accès web, réutilisables. Choisis-le sous la zone de message.':'An assistant = a role (instructions), documents and web access, reusable. Pick it under the message box.',
@@ -942,7 +950,12 @@ const EN={
  'Branche des serveurs MCP (le même format que Claude Desktop) : le modèle peut alors appeler leurs outils (fichiers, GitHub, bases de données…). Les outils tournent sur ton PC ; certains accèdent à Internet.':'Plug in MCP servers (same format as Claude Desktop): the model can then call their tools (files, GitHub, databases…). Tools run on your PC; some reach the Internet.',
  'Activer les outils MCP dans les conversations':'Enable MCP tools in conversations','Redémarrer':'Restart','démarrage…':'starting…','désactivé':'disabled',
  'outil(s)':'tool(s)','Enregistrer et démarrer':'Save and start','JSON invalide : ':'Invalid JSON: ',
- 'Sparky exécute un prompt à heure fixe (ex. « résume l’actualité tech du jour ») et range la réponse dans une nouvelle conversation. Sparky doit rester ouvert. Les tâches ont accès au web.':'Sparky runs a prompt on a schedule (e.g. "summarize today’s tech news") and puts the answer in a new conversation. Sparky must stay open. Tasks have web access.',
+ 'Choisis le modèle et les outils de la tâche. Pour une synthèse à valider, choisis une collection. Sparky doit rester ouvert.':'Choose the model and tools for the task. Select a collection to create a cited summary for review. Sparky must remain open.',
+ 'Synthèse à valider':'Summary for review','Tâche simple':'Simple task','Modèle actif au démarrage de la tâche':'Model active at task start',
+ 'Annuler la séquence':'Cancel workflow','Séquence annulée':'Workflow cancelled','Collection indisponible':'Collection unavailable',
+ 'Synthèse en lecture seule. Pour poursuivre, créez une discussion depuis un message.':'This summary is read-only. To continue, start a new chat from a message.',
+ 'Valider cette synthèse':'Approve this summary','Refuser cette synthèse':'Reject this summary','En attente de validation':'Awaiting review',
+ 'Recherche documentaire':'Document search','Synthèse en cours':'Summarizing','Synthèse validée':'Summary approved','Synthèse refusée':'Summary rejected',
  'chaque jour à':'every day at','chaque':'every','à':'at','toutes les':'every','une fois, le':'once, on','prochaine :':'next:','en pause':'paused','dernière :':'last:',
  'Lancer maintenant':'Run now','Voir le résultat':'See the result','Voir le résultat •':'See the result •','Nouvelle tâche':'New task','Revue de presse':'News digest',
  'Fais-moi un résumé des 5 actualités tech les plus importantes du jour, avec les sources.':'Give me a summary of today’s 5 most important tech news, with sources.',
@@ -996,11 +1009,11 @@ const EN={
  'Ouvrir':'Open','Lancer une commande':'Run a command','Disques':'Disks',
  'Thème':'Theme','Auto (comme Windows)':'Auto (follow Windows)','Clair':'Light','Sombre':'Dark',
  // projets
- 'Test automatique : ça fonctionne':'Automatic test: it works','Test automatique : erreurs trouvées':'Automatic test: errors found','essai':'attempt',
- 'Tester et corriger automatiquement les projets':'Automatically test and fix projects',
- 'Console':'Console','Lancer le programme':'Run the program','▶ Lancer':'▶ Run','Envoyer l’erreur à l’assistant':'Send the error to the assistant',
- 'point d’entrée':'entry point','Clique sur ▶ Lancer pour exécuter le programme sur ton PC (60 s max).':'Click ▶ Run to execute the program on your PC (60 s max).',
- 'exécution…':'running…','(aucune sortie)':'(no output)','Le programme a planté à l’exécution':'The program crashed when run','Corrige les fichiers concernés.':'Fix the files involved.',
+ 'Contrôles statiques réussis':'Static checks passed','Erreur de vérification statique':'Static check failed','Vérification incomplète':'Not verified','Résultat archivé':'Archived result','essai':'attempt',
+ 'Vérifier et corriger automatiquement le code des projets':'Automatically check project source and fix errors',
+ 'Console':'Console','Vérifier le projet':'Check project','Envoyer l’erreur à l’assistant':'Send the error to the assistant',
+ 'point d’entrée':'entry point','Vérifie les sources sans exécuter le projet.':'Check the source without running the project.',
+ 'vérification…':'checking…','(aucune sortie)':'(no output)','La vérification statique a trouvé une erreur':'The static check found an error','Corrige les fichiers concernés.':'Fix the files involved.',
  "Ce projet n'a pas de programme à lancer : c'est un site, ouvre l'onglet Aperçu.":'This project has no program to run: it is a website, open the Preview tab.',
  // Sparky Bot
  'Un compagnon qui apprend à te connaître':'A companion that gets to know you','bêta':'beta','Écris à ton compagnon…':'Write to your companion…',
@@ -1008,7 +1021,8 @@ const EN={
  'Proches':'People','Objectifs':'Goals','Événements':'Events','Façon de parler':'How you talk','Autres':'Other','Chercher dans la mémoire…':'Search memory…',
  'Ajouter un souvenir…':'Add a memory…','Ajouter':'Add','🔎 Recherche par le sens active (multilingual-e5).':'🔎 Semantic search on (multilingual-e5).',
  'Recherche par mots-clés (modèle de mémoire absent).':'Keyword search (memory model not installed).',
- 'Tout reste sur ton PC. Clique sur un souvenir pour le modifier, épingle-le ★ pour qu’il soit toujours pris en compte, ou supprime-le ✕.':'Everything stays on your PC. Click a memory to edit it, pin it ★ so it is always taken into account, or delete it ✕.',
+ 'Compagnon local uniquement':'Local-only companion','Le compagnon utilise le modèle local.':'The companion uses the local model.',
+ 'Le compagnon utilise le cloud. Les échanges et, si la mémoire est activée, les souvenirs et résumés peuvent être envoyés à':'The companion uses the cloud. Exchanges and, when memory is on, memories and summaries can be sent to',
  'Ta façon de parler (apprise)':'How you like to talk (learned)','Rien encore : ça s’apprend au fil des conversations.':'Nothing yet: it is learned over time.',
  'Ce que je retiens de nos échanges':'What I remember from our talks','Pas encore de résumé : il se fait pendant les pauses.':'No summary yet: it is written during breaks.',
  'À te demander la prochaine fois':'To ask you next time','Notre lien':'Our bond','Réfléchir maintenant':'Reflect now','Réflexion…':'Reflecting…',
@@ -1098,7 +1112,7 @@ const SVG={
  ref:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>',
  trash:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>'};
 let pend=[], mask=null, busy=false, T=null, SID=null, EPH=false, lastUser=null;
-const U=id=>'/api/img/'+SID+'/'+id;
+const U=id=>'/api/img/'+encodeURIComponent(SID)+'/'+encodeURIComponent(id);
 
 // ---------- utilitaires
 function el(tag,cls,html){const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e}
@@ -1126,7 +1140,7 @@ const nearBottom=()=>sc.scrollHeight-sc.scrollTop-sc.clientHeight<160;
 const down=force=>{if(force||nearBottom())requestAnimationFrame(()=>sc.scrollTop=sc.scrollHeight)};
 function imgCard(src,id,small){
   const d=el('div','im');const i=new Image();i.src=src;i.onclick=()=>{$('view').firstChild.src=i.src;$('view').style.display='grid'};d.append(i);
-  if(id!=null&&!small){d.append(el('span','tag','#'+id));const a=el('div','acts');
+  if(id!=null&&!small){d.append(el('span','tag','#'+esc(id)));const a=el('div','acts');
     const b1=el('button','',SVG.edit);b1.title='Peindre une zone à modifier';b1.onclick=e=>{e.stopPropagation();openEditor(id)};
     const b2=el('button','',SVG.ref);b2.title='Citer dans le message';b2.onclick=e=>{e.stopPropagation();ta.value+=(ta.value?' ':'')+'#'+id+' ';upd();ta.focus()};
     const b3=el('a','',SVG.dl);b3.title='Télécharger';b3.href=src;b3.download='sparky_'+id+'.png';
@@ -1142,7 +1156,7 @@ async function loadList(){const l=await(await fetch('/api/sessions')).json();con
   l.forEach(s=>{const d=el('div','cv'+(s.id===SID?' on':''));d.append(el('span','',esc(s.title)));
     const x=el('button','',SVG.trash);x.title='Supprimer';
     x.onclick=async ev=>{ev.stopPropagation();if(!confirm('Supprimer « '+s.title+' » ?\nSes images seront effacées.'))return;
-      await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:s.id})});if(s.id===SID)blank(false);else loadList()};
+      const r=await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:s.id})});if(!r.ok)return alert((await r.json()).error||r.statusText);if(s.id===SID)blank(false);else loadList()};
     d.onclick=()=>{open_(s.id);if(matchMedia('(max-width:760px)').matches)setSide(false)};d.append(x);box.append(d)})}
 function setEph(on){EPH=on;$('eph').classList.toggle('on',on);$('ephb').style.display=on?'':'none'}
 async function open_(id){if(busy)return;SID=id;setEph(false);log.innerHTML=HELLO;T=null;resetArts();try{localStorage.setItem('sparky.sid',id)}catch{}
@@ -1182,7 +1196,8 @@ function newTurn(){T={a:null,typing:null,think:null,reply:null,act:null,timer:nu
 function reasoning(e,live){hideTyping();
   if(!T.rs){T.rs=el('details','rs');T.rs.innerHTML='<summary></summary><div class="bd"></div>';A().append(T.rs);if(live&&e.type==='reasoning')T.rs.open=true}
   T.rs.querySelector('.bd').textContent=e.text||'';
-  T.rs.querySelector('summary').innerHTML=IC.brain('#b9adff')+(e.type==='reasoning'?'Réflexion en cours… '+(e.secs||0)+' s':'Réflexion · '+(e.secs||0)+' s');
+  const summary=T.rs.querySelector('summary');summary.innerHTML=IC.brain('#b9adff');
+  summary.append((e.type==='reasoning'?'Réflexion en cours… ':'Réflexion · ')+(Number.isFinite(e.secs)?e.secs:0)+' s');
   if(e.type==='reasoned'){T.rs.open=false;T.rs=null}else T.rs.querySelector('.bd').scrollTop=1e9;down()}
 function A(){if(!T.a){T.a=el('div','a');log.append(T.a)}return T.a}
 function showTyping(text){if(!T.typing){T.typing=el('div','typing','<span class="dots"><i></i><i></i><i></i></span><span class="s"></span>');log.append(T.typing)}
@@ -1196,11 +1211,14 @@ function userMsg(text,srcs,ids,maskFor,ts,state,files){
   $('hello')?.remove();const u=el('div','u');
   if(files?.length){const p=el('div','files');files.forEach(f=>p.append(fchip({...f,state:'ok'})));u.append(p)}
   if(srcs.length){const p=el('div','pics');srcs.forEach((s,k)=>p.append(imgCard(s,ids?ids[k]:null)));u.append(p)}
-  if(maskFor)u.append(el('div','st','zone peinte sur #'+maskFor));
+  if(maskFor)u.append(el('div','st','zone peinte sur #'+esc(maskFor)));
   if(text)u.append(el('div','t',md(text)));
   const st=el('div','st',hhmm(ts));st.append(el('span','tick'));u.append(st);log.append(u);setTicks(u,state);lastUser=u;down(true);return u}
 const toolLabel={generate:'Génère une image',edit:'Retouche'};
 function onEvent(e,live){
+  if(e.type==='started'){if(live){activeTurn=e.turnId;$('stopTurn').hidden=false;$('stopTurn').disabled=false}return}
+  if(e.type==='done'&&live){activeTurn=null;$('stopTurn').hidden=true}
+  if(e.type==='done'&&['cancelled','interrupted'].includes(e.status)){if(!T)newTurn();A().append(el('div','mute',esc(tr(e.status==='cancelled'?'Génération arrêtée.':'Génération interrompue.'))))}
   if(e.type==='user'){
     if(live&&lastUser&&lastUser.dataset.state!=='done'){const p=lastUser.querySelector('.pics');if(p&&e.images?.length){p.innerHTML='';e.images.forEach(id=>p.append(imgCard(U(id),id)))}}
     else{userMsg(e.text,(e.images||[]).map(U),e.images,e.maskFor,e.ts,'read',e.files);lastUser.dataset.state='done'}
@@ -1237,13 +1255,13 @@ function onEvent(e,live){
 }
 
 // ---------- artifacts : panneau à droite (aperçu en direct + code)
-let ARTS={},ART=null,ARTV=null,artTab='view';
+let ARTS=Object.create(null),ART=null,ARTV=null,artTab='view';
 const EXT={html:'html',svg:'svg',markdown:'md',python:'py',javascript:'js',typescript:'ts',css:'css',json:'json',bash:'sh',shell:'sh',powershell:'ps1',java:'java',c:'c',cpp:'cpp',csharp:'cs',go:'go',rust:'rs',php:'php',ruby:'rb',sql:'sql',yaml:'yml',jsx:'jsx',tsx:'tsx'};
 const previewable=a=>['html','svg','markdown'].includes(a.kind);
 const ICO_CODE='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg>';
 function artCard(id,live){const c=el('div','artc');c.dataset.art=id;c.onclick=()=>openArt(id);A().append(c);return c}
 function fillCard(c,a,live){c.innerHTML='<span class="ico">'+(live?'<span class="sp"></span>':ICO_CODE)+'</span><span class="n"><b>'+esc(a.title)+'</b><small>'
-  +(live?'écriture en cours… '+a.versions.at(-1).split('\n').length+' lignes':(a.kind==='code'?esc(a.language):a.kind.toUpperCase())+' · version '+a.versions.length)+'</small></span><span class="go2">Ouvrir ›</span>'}
+  +(live?'écriture en cours… '+a.versions.at(-1).split('\n').length+' lignes':(a.kind==='code'?esc(a.language):esc(String(a.kind).toUpperCase()))+' · version '+a.versions.length)+'</small></span><span class="go2">Ouvrir ›</span>'}
 function artLive(e){const id=(e.id||e.title||'artifact').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-|-$/g,'')||'artifact';
   const a=ARTS[id]||(ARTS[id]={title:e.title||id,kind:e.kind||'code',language:e.language||'',versions:[]});
   if(!T.artLive||T.artLive.id!==id){a.versions.push('');T.artLive={id,card:artCard(id,true)}}
@@ -1256,47 +1274,56 @@ function artDone(e,live){const a=ARTS[e.id]||(ARTS[e.id]={title:e.title,kind:e.k
   document.body.classList.remove('artlive');if(live)openArt(e.id,previewable(a)?'view':'code')}
 function openArt(id,tab){ART=id;ARTV=null;if(tab)artTab=tab;document.body.classList.add('art');renderArt()}
 function artSrc(a,v){const s=a.versions[v];return a.kind==='svg'?'<!doctype html><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#fff">'+s+'</body>':s}
+function previewStandalone(a,v,frame){
+  const form=document.createElement('form'),field=document.createElement('textarea');
+  form.method='POST';form.action=PREVIEW+'/artifact';form.hidden=true;
+  if(frame){frame.name='sparky-live-preview';form.target=frame.name}else{form.target='_blank';form.rel='noopener'}
+  field.name='html';field.value=a.kind==='markdown'?'<meta charset="utf-8"><body>'+mdx(a.versions[v])+'</body>':artSrc(a,v);
+  form.append(field);document.body.append(form);try{form.submit()}finally{form.remove()}}
 // ---------- projets multi-fichiers (site avec CSS/JS séparés, programme Python en modules…)
 const ICO_DIR='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>';
 const projKind=a=>/\.html?$/.test(a.entry||'')?'web':/\.py$/.test(a.entry||'')?'py':'other';
 function projOf(e){const id=String(e.project||e.id||e.title||'projet').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-|-$/g,'')||'projet';
-  return [id,ARTS[id]||(ARTS[id]={kind:'project',title:e.title||id,files:{},entry:null,version:0,cur:null,run:null})]}
-function projCard(id){T.projCards=T.projCards||{};return T.projCards[id]||(T.projCards[id]=artCard(id))}
+  return [id,ARTS[id]||(ARTS[id]={kind:'project',title:e.title||id,files:Object.create(null),entry:null,version:0,cur:null,run:null})]}
+function projCard(id){T.projCards=T.projCards||Object.create(null);return T.projCards[id]||(T.projCards[id]=artCard(id))}
 function fillProj(c,a,writing){const n=Object.keys(a.files).length;c.innerHTML='<span class="ico">'+(writing?'<span class="sp"></span>':ICO_DIR)+'</span><span class="n"><b>'+esc(a.title)+'</b><small>'
   +(writing?'écrit '+esc(writing)+'…':n+(n>1?' fichiers':' fichier')+(a.entry?' · '+esc(a.entry):''))+'</small></span><span class="go2">Ouvrir ›</span>'}
 function projLive(e){const[id,a]=projOf(e);a.title=e.title||a.title;a.files[e.path]=e.content;a.cur=e.path;T.lastProj=id;
   fillProj(projCard(id),a,e.path);document.body.classList.add('artlive');if(ART!==id||!document.body.classList.contains('art'))openArt(id,'code');else renderArt(true)}
-function projDone(e,live){const[id,a]=projOf(e);a.title=e.title||a.title;if(e.asset!=null){a.assets=a.assets||{};a.assets[e.path]=e.asset}else a.files[e.path]=e.content;a.entry=e.entry;a.version=e.version;a.cur=a.cur||e.path;
+function projDone(e,live){const[id,a]=projOf(e);a.title=e.title||a.title;if(e.asset!=null){a.assets=a.assets||Object.create(null);a.assets[e.path]=e.asset}else a.files[e.path]=e.content;a.entry=e.entry;a.version=e.version;a.cur=a.cur||e.path;
   T.lastProj=id;fillProj(projCard(id),a,null);document.body.classList.remove('artlive');if(live){a.cur=e.path;if(ART===id)renderArt()}}
-function testCard(e){const b=el('div','step ok');
-  b.innerHTML='<div class="row"><span class="tdot '+(e.ok?'ok':'ko')+'"></span><span>'+esc(tr(e.ok?'Test automatique : ça fonctionne':'Test automatique : erreurs trouvées'))+' · '+esc(e.title)+(e.round>1?' · '+esc(tr('essai'))+' '+e.round:'')+'</span><span class="tm">'+(e.secs||0)+' s</span></div>';
-  const d=el('details');d.innerHTML='<summary>'+esc(tr('détails'))+'</summary><code></code>';d.querySelector('code').textContent=e.output||'';b.append(d);A().append(b);
-  const a=ARTS[e.project];if(a){a.run={code:e.code,output:e.output,secs:e.secs};if(ART===e.project&&artTab==='run')renderArt()}}
-function renderProj(streaming){const a=ARTS[ART],k=projKind(a),B=$('artB');document.body.classList.toggle('projpy',k==='py');
+function checkLabel(status){return tr(status==='passed'?'Contrôles statiques réussis':status==='failed'?'Erreur de vérification statique':status==='unverified'?'Vérification incomplète':'Résultat archivé')}
+function testCard(e){const b=el('div','step'),row=el('div','row'),label=el('span'),duration=el('span','tm');
+  label.textContent=checkLabel(e.status)+' · '+(e.title||'')+(Number.isInteger(e.round)&&e.round>1?' · '+tr('essai')+' '+e.round:'');
+  duration.textContent=Number.isFinite(e.secs)?e.secs+' s':'';
+  row.append(el('span','tdot '+(e.status==='passed'?'ok':e.status==='failed'?'ko':'')),label,duration);b.append(row);
+  const d=el('details'),head=el('summary'),out=el('code');head.textContent=tr('détails');out.textContent=e.output||'';d.append(head,out);b.append(d);A().append(b);
+  const a=ARTS[e.project];if(a){a.run={status:e.status,code:e.code,output:e.output,secs:e.secs};if(ART===e.project&&artTab==='run')renderArt()}}
+function renderProj(streaming){const a=ARTS[ART],k=projKind(a),B=$('artB');document.body.classList.add('projpy');
   $('artT').textContent=a.title;$('artV').style.display='none';$('artTabs').style.display='';
-  $('artTabs').querySelector('[data-t=view]').style.display=k==='web'?'':'none';$('artRunTab').style.display=k==='py'?'':'none';
-  let tab=artTab;if(tab==='view'&&k!=='web')tab='code';if(tab==='run'&&k!=='py')tab='code';if(document.body.classList.contains('artlive'))tab='code';
+  $('artTabs').querySelector('[data-t=view]').style.display=k==='web'?'':'none';$('artRunTab').style.display='';
+  let tab=artTab;if(tab==='view'&&k!=='web')tab='code';if(document.body.classList.contains('artlive'))tab='code';
   $('artTabs').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.t===tab));
   if(tab==='view'){B.innerHTML='';const f=document.createElement('iframe');
     // the preview origin (port + 1) is not Sparky's: same-origin there only gives the project its own storage
     f.setAttribute('sandbox','allow-scripts allow-same-origin allow-modals allow-forms allow-popups allow-pointer-lock');
     f.src=PREVIEW+'/api/proj/'+encodeURIComponent(SID)+'/'+encodeURIComponent(ART)+'/'+a.entry+'?v='+a.version;B.append(f);return}
-  if(tab==='run'){B.innerHTML='<div class="pcons"><div class="pbar"><button class="go" id="pRun">'+tr('▶ Lancer')+'</button><span id="pSt"></span><span class="sp"></span><button class="bbtn" id="pFix" style="display:none">'+tr('Envoyer l’erreur à l’assistant')+'</button></div><pre id="pOut"></pre></div>';
+  if(tab==='run'){B.innerHTML='<div class="pcons"><div class="pbar"><button class="go" id="pRun">'+tr('Vérifier le projet')+'</button><span id="pSt"></span><span class="sp"></span><button class="bbtn" id="pFix" style="display:none">'+tr('Envoyer l’erreur à l’assistant')+'</button></div><pre id="pOut"></pre></div>';
     $('pRun').onclick=runProj;$('pFix').onclick=fixProj;showRun(a);return}
   let box=B.querySelector('.pwrap');if(!box){B.innerHTML='<div class="pwrap"><div class="pfiles"></div><pre id="artCode"></pre></div>';box=B.querySelector('.pwrap')}
   const files=[...Object.keys(a.files),...Object.keys(a.assets||{})].sort((x,y)=>(y===a.entry)-(x===a.entry)||x.localeCompare(y)),cur=files.includes(a.cur)?a.cur:files[0];a.cur=cur;
   const fl=box.querySelector('.pfiles');fl.innerHTML='';files.forEach(p=>{const b=el('button',p===cur?'on':'',esc(p)+(p===a.entry?'<span class="dot">●</span>':''));b.title=p===a.entry?tr('point d’entrée'):'';if((a.assets||{})[p]!=null)b.prepend('🖼 ');b.onclick=()=>{a.cur=p;renderArt()};fl.append(b)});
-  if((a.assets||{})[cur]!=null){box.querySelector('pre').innerHTML='<div style="padding:16px"><img style="max-width:100%;border-radius:10px" src="'+PREVIEW+'/api/proj/'+encodeURIComponent(SID)+'/'+encodeURIComponent(ART)+'/'+cur+'"></div>';return}
+  if(a.assets?.[cur]!=null){const img=new Image();img.style.cssText='max-width:100%;border-radius:10px';img.src=PREVIEW+'/api/proj/'+encodeURIComponent(SID)+'/'+encodeURIComponent(ART)+'/'+cur.split('/').map(encodeURIComponent).join('/');box.querySelector('pre').replaceChildren(img);return}
   const pre=box.querySelector('pre'),stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<60;
   pre.innerHTML=(a.files[cur]||'').split('\n').map(l=>'<span>'+(esc(l)||' ')+'</span>').join('');if(streaming&&stick)pre.scrollTop=pre.scrollHeight}
-function showRun(a){const r=a.run;if(!r){$('pOut').textContent=tr('Clique sur ▶ Lancer pour exécuter le programme sur ton PC (60 s max).');return}
-  $('pSt').textContent=tr((r.code===0?'✓ terminé':r.code==null?'':'✗ code '+r.code)+(r.secs?' · '+r.secs+' s':''));
-  $('pOut').innerHTML=esc(tr(r.output||'(aucune sortie)')).replace(/(Traceback[\s\S]*$)/,'<span class="err">$1</span>');$('pFix').style.display=r.code&&r.code!==0?'':'none'}
-async function runProj(){const a=ARTS[ART];artTab='run';renderArt();$('pRun').disabled=true;$('pSt').textContent=tr('exécution…');$('pOut').textContent='';
-  try{a.run=await(await fetch('/api/projrun',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SID,project:ART})})).json()}
-  catch(e){a.run={code:-1,output:String(e)}}showRun(a);$('pRun').disabled=false}
+function showRun(a){const r=a.run;if(!r){$('pOut').textContent=tr('Vérifie les sources sans exécuter le projet.');return}
+  $('pSt').textContent=checkLabel(r.status)+(Number.isFinite(r.secs)?' · '+r.secs+' s':'');
+  $('pOut').textContent=r.output||tr('(aucune sortie)');$('pFix').style.display=r.status==='failed'?'':'none'}
+async function runProj(){const a=ARTS[ART];artTab='run';renderArt();const btn=$('pRun');if(!btn)return;btn.disabled=true;$('pSt').textContent=tr('vérification…');$('pOut').textContent='';
+  try{const resp=await fetch('/api/projrun',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SID,project:ART})});const data=await resp.json();if(!resp.ok)throw new Error(data.error||resp.statusText);a.run=data}
+  catch(e){a.run={status:'unverified',code:null,output:String(e)}}if(ARTS[ART]===a&&$('pRun')){showRun(a);$('pRun').disabled=false}}
 function fixProj(){const a=ARTS[ART],out=(a.run.output||'').slice(-2500);
-  ta.value=tr('Le programme a planté à l’exécution')+' (projet '+ART+') :\n```\n'+out+'\n```\n'+tr('Corrige les fichiers concernés.');upd();send()}
+  ta.value=tr('La vérification statique a trouvé une erreur')+' (projet '+ART+') :\n```\n'+out+'\n```\n'+tr('Corrige les fichiers concernés.');upd();send()}
 $('artRun').onclick=()=>runProj();
 
 function renderArt(streaming){const a=ARTS[ART];if(!a)return;if(a.kind==='project')return renderProj(streaming);
@@ -1312,7 +1339,9 @@ function renderArt(streaming){const a=ARTS[ART];if(!a)return;if(a.kind==='projec
     const stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<60;pre.innerHTML=code.split('\n').map(l=>'<span>'+(esc(l)||' ')+'</span>').join('');
     if(streaming&&stick)pre.scrollTop=pre.scrollHeight;return}
   if(a.kind==='markdown'){B.innerHTML='<div id="artMd"></div>';$('artMd').innerHTML=mdx(code);return}
-  B.innerHTML='';const f=document.createElement('iframe');f.setAttribute('sandbox','allow-scripts allow-modals allow-forms allow-popups allow-pointer-lock');f.srcdoc=artSrc(a,v);B.append(f)}
+  B.innerHTML='';const f=document.createElement('iframe');f.name='sparky-live-preview';
+  // The empty frame must be targetable by the form. The preview response enforces an opaque sandbox via CSP.
+  f.setAttribute('sandbox','allow-same-origin allow-scripts allow-modals allow-forms allow-popups allow-pointer-lock');B.append(f);previewStandalone(a,v,f)}
 $('artTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{artTab=b.dataset.t;renderArt()});
 $('artV').onchange=()=>{ARTV=+$('artV').value;renderArt()};
 $('artX').onclick=()=>document.body.classList.remove('art');
@@ -1320,12 +1349,12 @@ $('artCopy').onclick=()=>{const a=ARTS[ART];navigator.clipboard.writeText(a.kind
 function artFile(){const a=ARTS[ART],v=ARTV??a.versions.length-1;const ext=a.kind==='code'?(EXT[(a.language||'').toLowerCase()]||'txt'):EXT[a.kind];
   return {name:(a.title||ART).replace(/[\\/:*?"<>|]+/g,'').trim()+'.'+ext,blob:new Blob([a.kind==='svg'?a.versions[v]:a.versions[v]],{type:a.kind==='html'?'text/html':a.kind==='svg'?'image/svg+xml':'text/plain'})}}
 $('artDl').onclick=()=>{if(ARTS[ART].kind==='project'){location.href='/api/projzip?id='+encodeURIComponent(SID)+'&project='+encodeURIComponent(ART);return}const f=artFile(),u=URL.createObjectURL(f.blob),l=document.createElement('a');l.href=u;l.download=f.name;l.click();setTimeout(()=>URL.revokeObjectURL(u),2000)};
-$('artTab').onclick=()=>{const a=ARTS[ART];if(a.kind==='project'){window.open(PREVIEW+'/api/proj/'+encodeURIComponent(SID)+'/'+encodeURIComponent(ART)+'/'+a.entry,'_blank');return}const v=ARTV??a.versions.length-1;
-  const b=new Blob([a.kind==='markdown'?'<!doctype html><meta charset="utf-8"><body style="font:16px/1.6 system-ui;max-width:760px;margin:40px auto;white-space:pre-wrap">'+mdx(a.versions[v])+'</body>':artSrc(a,v)],{type:'text/html'});window.open(URL.createObjectURL(b),'_blank')};
+$('artTab').onclick=()=>{const a=ARTS[ART];if(a.kind==='project'){window.open(PREVIEW+'/api/proj/'+encodeURIComponent(SID)+'/'+encodeURIComponent(ART)+'/'+a.entry,'_blank','noopener');return}
+  previewStandalone(a,ARTV??a.versions.length-1,null)};
 $('artDrag').onpointerdown=e=>{e.preventDefault();const ifr=$('artB').querySelector('iframe');if(ifr)ifr.style.pointerEvents='none';
   const mv=ev=>document.documentElement.style.setProperty('--artw',Math.max(340,innerWidth-ev.clientX)+'px');
   const up=()=>{removeEventListener('pointermove',mv);removeEventListener('pointerup',up);if(ifr)ifr.style.pointerEvents=''};addEventListener('pointermove',mv);addEventListener('pointerup',up)};
-function resetArts(){ARTS={};ART=null;document.body.classList.remove('art','artlive','projpy')}
+function resetArts(){ARTS=Object.create(null);ART=null;document.body.classList.remove('art','artlive','projpy')}
 
 // ---------- dictée vocale (Whisper hors ligne) : barres en direct, stop = transcription dans le champ
 let REC=null;
@@ -1434,7 +1463,11 @@ function renderPane(){const P=$('bpane');if(!BOT)return;
     ab.onclick=async()=>{if(!ai.value.trim())return;await api('/api/bot/memory',{text:ai.value.trim(),category:'other',importance:4});ai.value='';ai.blur();await loadBot()};
     ai.onkeydown=e=>{if(e.key==='Enter')ab.click()};add.append(ai,ab);P.append(add);
     const j=BOT.embedJob;P.append(el('div','bnote',BOT.embeddings?'🔎 Recherche par le sens active (multilingual-e5).':(j&&j.state==='running'?'Téléchargement du modèle de mémoire… '+Math.floor(j.done/Math.max(1,j.total)*100)+' %':'Recherche par mots-clés (modèle de mémoire absent).')));
-    P.append(el('div','bnote','Tout reste sur ton PC. Clique sur un souvenir pour le modifier, épingle-le ★ pour qu’il soit toujours pris en compte, ou supprime-le ✕.'));}
+    const notice=el('div','bnote');
+    notice.textContent=BOT.profile.local_only?tr('Compagnon local uniquement'):BOT.cloud_provider?
+      tr('Le compagnon utilise le cloud. Les échanges et, si la mémoire est activée, les souvenirs et résumés peuvent être envoyés à')+' '+BOT.cloud_provider+'.':
+      tr('Le compagnon utilise le modèle local.');
+    P.append(notice);}
   else if(bTab==='you'){
     const st=BOT.style||{};P.append(el('div','mcat','Ta façon de parler (apprise)'));
     const ks=Object.keys(st);if(!ks.length)P.append(el('div','bnote','Rien encore : ça s’apprend au fil des conversations.'));
@@ -1452,7 +1485,9 @@ function renderPane(){const P=$('bpane');if(!BOT)return;
     const f2=el('div','bf');f2.append(el('label','','Personnalité'));const s=el('select');for(const k in BOT.personas){const o=el('option','',esc(lbl(BOT.personas[k])));o.value=k;s.append(o)}s.value=p.persona;f2.append(s);
     const f3=el('div','bf');f3.append(el('label','','Notes de personnalité (optionnel)'));const t=el('textarea');t.placeholder='ex. tutoie-moi, parle-moi comme un pote, adore les jeux de mots';t.value=p.custom||'';f3.append(t);
     const f4=el('div','bf');const lab=el('label','');const cb=el('input');cb.type='checkbox';cb.checked=p.memory_on;cb.style.width='auto';lab.append(cb,el('span','',' Mémoire activée (apprendre de nos conversations)'));f4.append(lab);
-    const sv=el('button','bbtn','Enregistrer');sv.onclick=async()=>{await api('/api/bot/profile',{name:n.value.trim()||'Sparky',persona:s.value,custom:t.value.trim(),memory_on:cb.checked});await loadBot()};
+    const only=el('input');only.type='checkbox';only.checked=!!p.local_only;only.style.width='auto';
+    const localLabel=el('label','');localLabel.append(only,document.createTextNode(' '+tr('Compagnon local uniquement')));f4.append(localLabel);
+    const sv=el('button','bbtn','Enregistrer');sv.onclick=async()=>{await api('/api/bot/profile',{name:n.value.trim()||'Sparky',persona:s.value,custom:t.value.trim(),memory_on:cb.checked,local_only:only.checked});await loadBot()};
     const fg=el('button','bbtn danger','Tout oublier');fg.style.marginLeft='8px';
     fg.onclick=async()=>{if(!confirm('Effacer toute la mémoire, le journal et l’historique de '+p.name+' ?\nC’est définitif.'))return;await api('/api/bot/forget');await loadBot();renderLog();botStream('/api/bot/greet',{})};
     P.append(f1,f2,f3,f4,sv,fg)}}
@@ -1480,7 +1515,7 @@ function fkind(f){const e=fext(f.name);for(const k in FEXT)if(FEXT[k].includes(e
   if(f.type.startsWith('audio/'))return 'audio';if(f.type.startsWith('video/'))return 'video';return f.type.startsWith('text/')||e?'text':'other'}
 const FSVG='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
 function fchip(f,onX){const c=el('div','fchip');const lab=(fext(f.name)||f.kind).slice(0,4).toUpperCase();
-  c.innerHTML='<span class="fi '+f.kind+'">'+FSVG+'<span>'+esc(lab)+'</span></span><div class="fn"><b title="'+esc(f.name)+'">'+esc(f.name)+'</b><small></small></div>';
+  c.innerHTML='<span class="fi '+esc(f.kind)+'">'+FSVG+'<span>'+esc(lab)+'</span></span><div class="fn"><b title="'+esc(f.name)+'">'+esc(f.name)+'</b><small></small></div>';
   const sm=c.querySelector('small');
   if(f.state==='reading'||f.state==='upload'){sm.innerHTML='<span class="spin"></span><span></span>';sm.lastChild.textContent=f.state==='upload'?'Envoi du fichier…':(f.kind==='audio'||f.kind==='video')?'Transcription…':'Lecture…'}
   else if(f.state==='error'){sm.className='err';sm.textContent=f.error}
@@ -1511,22 +1546,25 @@ addEventListener('drop',e=>{e.preventDefault();dc=0;$('drop').style.display='non
 $('view').onclick=()=>$('view').style.display='none';
 
 // ---------- envoi
+let activeTurn=null;
+$('stopTurn').onclick=async()=>{const id=activeTurn;if(!id)return;$('stopTurn').disabled=true;
+  try{const r=await post('/api/turn/cancel',{id:SID,turnId:id});if(!r.ok)throw Error((await r.json()).error)}
+  catch(err){if(activeTurn===id){$('stopTurn').disabled=false;onEvent({type:'error',text:String(err.message)},true)}}};
 function upd(){const fr=pfiles.filter(f=>f.state==='ok').length,wait=pfiles.some(f=>f.state==='reading'||f.state==='upload');
-  $('send').disabled=busy||wait||(typeof swBusy!=='undefined'&&swBusy)||!(ta.value.trim()||pend.length||fr);ta.style.height='38px';ta.style.height=Math.min(200,ta.scrollHeight)+'px'}
+  $('send').disabled=busy||document.body.classList.contains('loading-chat')||wait||(typeof swBusy!=='undefined'&&swBusy)||!(ta.value.trim()||pend.length||fr);ta.style.height='38px';ta.style.height=Math.min(200,ta.scrollHeight)+'px'}
 ta.addEventListener('input',upd);ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 $('send').onclick=send;
 async function send(){
+  if(CFG.reviewSnapshot)return;
   const docs=pfiles.filter(f=>f.state==='ok');
-  const text=ta.value.trim();if(busy||pfiles.some(f=>f.state==='reading'||f.state==='upload')||!(text||pend.length||docs.length))return;busy=true;
+  const text=ta.value.trim();if(busy||document.body.classList.contains('loading-chat')||pfiles.some(f=>f.state==='reading'||f.state==='upload')||!(text||pend.length||docs.length))return;busy=true;
   const imgs=pend.slice(),m=mask;userMsg(text,imgs,null,m?.for,null,'pending',docs);   // affiché tout de suite
   ta.value='';pend=[];pfiles=[];mask=null;renderAtt();upd();newTurn();
   try{
-    if(!SID){const r=await(await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ephemeral:EPH})})).json();SID=r.id;if(!EPH){try{localStorage.setItem('sparky.sid',SID)}catch{}}}
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SID,ephemeral:EPH,text,images:imgs,files:docs.map(f=>f.id),mask:m?.data||null,maskFor:m?.for||null})});
+    if(!SID)await createChat();
+    await flushConfig(SID);
     setTicks(lastUser,'sent');
-    const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
-    for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let k;
-      while((k=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,k);buf=buf.slice(k+2);if(line.startsWith('data: '))onEvent(JSON.parse(line.slice(6)),true)}}
+    await streamTo('/api/chat',{id:SID,turnId:crypto.randomUUID(),ephemeral:EPH,text,images:imgs,files:docs.map(f=>f.id),mask:m?.data||null,maskFor:m?.for||null});
   }catch(e){onEvent({type:'error',text:'Message non envoyé : '+e.message},true)}
   finally{busy=false;if(T)onEvent({type:'done'},true);upd();if(!EPH)loadList()}}
 upd();
@@ -1885,10 +1923,10 @@ mdx=function(s){
     .replace(/\\\(([\s\S]+?)\\\)/g,(m,a)=>M(a,false))
     .replace(/(^|[^\\$\w])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g,(m,pre,a)=>pre+M(a,false))
     .replace(/\[(\d{1,2})\](?!\()/g,'\u0004$1\u0005');
-  let h=DOMPurify.sanitize(marked.parse(parts.join('')),{ADD_ATTR:['target']});
+  let h=marked.parse(parts.join(''));
   h=h.replace(/\u0002(\d+)\u0003/g,(m,i)=>{const x=math[+i];try{return window.katex?katex.renderToString(x.t,{displayMode:x.d,throwOnError:false,output:'html'}):esc(x.t)}catch{return esc(x.t)}})
-     .replace(/\u0004(\d+)\u0005/g,'<sup class="cite" data-c="$1">$1</sup>');
-  queueEnhance();return '<div class="md">'+h+'</div>'};
+     .replace(/\u0004(\d+)\u0005/g,'<sup><button type="button" class="cite" data-c="$1" aria-label="Source $1">$1</button></sup>');
+  queueEnhance();return '<div class="md">'+DOMPurify.sanitize(h,{ADD_ATTR:['target']})+'</div>'};
 // LaTeX written by a model inside JSON: "\theta" arrives as TAB+"heta", "\frac" as FORM FEED+"rac"... put the backslash back
 function texEsc(s){return s.replace(/\t(?=[a-zA-Z])/g,'\\t').replace(/\f(?=[a-zA-Z])/g,'\\f').replace(/\x08(?=[a-zA-Z])/g,'\\b').replace(/\r(?=[a-zA-Z])/g,'\\r')
   .replace(/\n(?=(?:abla|eq|eg|ot|otin|leq|geq|parallel|exists|subseteq|subset|cong|sim|ewline|atural|leftarrow|rightarrow|Leftarrow|Rightarrow|vdash|prec|succ)\b)/g,'\\n')}
@@ -1905,14 +1943,21 @@ function loadMermaid(){return mermaidP||(mermaidP=new Promise((ok,ko)=>{const s=
 
 // ---------- conversation state: message numbers (edit / regenerate), versions, setup of the conversation
 let UIDX=-1,TBASE=0,VERS={};
-const CFG0=()=>({assistant:null,web:false,docs:[],system:'',computer:'off'});
+const CFG0=()=>({assistant:null,web:false,web_blocked:false,docs:[],excluded_docs:[],system:'',computer:'off'});
 let CFG=CFG0(),WS={assistants:[],prompts:[],knowledge:[],schedules:[],unread:[]};
 const _open0=open_,_blank0=blank;
-open_=async function(id){if(busy)return;SID=id;setEph(false);log.innerHTML=HELLO;T=null;resetArts();UIDX=-1;try{localStorage.setItem('sparky.sid',id)}catch{}
-  const s=await(await fetch('/api/state?id='+encodeURIComponent(id))).json();
-  VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{});const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
-  s.events.forEach(e=>onEvent(e,false));if(T){hideTyping();T=null}renderTools();down(true);loadList()};
-blank=function(eph){if(busy)return;UIDX=-1;TBASE=0;VERS={};CFG=CFG0();_blank0(eph);renderTools()};
+let navigation=0;
+open_=async function(id){if(busy)return;const request=++navigation;document.body.classList.add('loading-chat');upd();
+  try{if(configWrites.has(id))await flushConfig(id);
+    const r=await fetch('/api/state?id='+encodeURIComponent(id));if(!r.ok)throw new Error(r.statusText);
+    const s=await r.json();if(request!==navigation)return;
+    SID=id;setEph(false);log.innerHTML=HELLO;T=null;resetArts();UIDX=-1;
+    try{localStorage.setItem('sparky.sid',id)}catch{}
+    VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{},{reviewSnapshot:!!s.meta?.workflow_run});const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
+    s.events.forEach(e=>onEvent(e,false));if(T){hideTyping();T=null}renderTools();down(true);loadList();ta.focus()}
+  catch(e){if(request===navigation)alert(tr('Impossible d’ouvrir la conversation')+' · '+e.message)}
+  finally{if(request===navigation){document.body.classList.remove('loading-chat');upd()}}};
+blank=function(eph){if(busy)return;++navigation;document.body.classList.remove('loading-chat');UIDX=-1;TBASE=0;VERS={};CFG=CFG0();_blank0(eph);renderTools()};
 
 // hooks into the event renderer
 const _onEvent0=onEvent;
@@ -1932,12 +1977,14 @@ function closeStep(){if(T?.act){stopTimer();T.act.classList.add('ok');T.act.sub.
 
 // ---------- sources (web pages, documents) and citations [1]
 function sourcesBlock(e){const b=el('div','srcs');b.append(el('span','lbl',(e.kind==='web'?ICS.globe:ICS.books)+esc(tr(e.kind==='web'?'Sources web':'Tes documents'))));
-  (e.items||[]).forEach(s=>{const c=el(s.url?'a':'span','src','<b>'+s.n+'</b><span>'+esc(s.title||s.url||'')+'</span>');c.dataset.n=s.n;
-    if(s.url){c.href=s.url;c.target='_blank';c.rel='noopener';c.title=s.url+(s.text?'\n\n'+s.text:'')}else c.title=s.text||'';b.append(c)});return b}
-document.addEventListener('click',e=>{const c=e.target.closest('sup.cite');if(!c)return;const a=c.closest('.a');if(!a)return;
+  (e.items||[]).forEach(s=>{let url;try{const u=new URL(s.url);if(['http:','https:'].includes(u.protocol))url=u.href}catch{}
+    const c=el(url?'a':'button','src','<b>'+esc(s.n)+'</b><span>'+esc(s.title||s.url||'')+'</span>');c.dataset.n=s.n;
+    if(url){c.href=url;c.target='_blank';c.rel='noopener';c.title=url+(s.text?'\n\n'+s.text:'')}b.append(c);if(!url){c.type='button';c.title=s.text||'';c.setAttribute('aria-expanded','false');const excerpt=el('span','source-excerpt');excerpt.textContent=s.text||'';excerpt.hidden=true;
+      c.onclick=()=>{excerpt.hidden=!excerpt.hidden;c.setAttribute('aria-expanded',String(!excerpt.hidden))};b.append(excerpt)}});return b}
+document.addEventListener('click',e=>{const c=e.target.closest('button.cite');if(!c)return;const a=c.closest('.a');if(!a)return;
   const chips=[...a.querySelectorAll('.src')].filter(x=>x.dataset.n===c.dataset.c),s=chips.at(-1);if(!s)return;
-  s.scrollIntoView({block:'nearest',behavior:'smooth'});s.classList.add('flash');setTimeout(()=>s.classList.remove('flash'),1400)});
-document.addEventListener('mouseover',e=>{const c=e.target.closest('sup.cite');if(!c||c.title)return;const s=[...(c.closest('.a')?.querySelectorAll('.src')||[])].filter(x=>x.dataset.n===c.dataset.c).at(-1);
+  s.focus();if(s.tagName==='BUTTON'&&s.getAttribute('aria-expanded')==='false')s.click();s.scrollIntoView({block:'nearest'});s.classList.add('flash');setTimeout(()=>s.classList.remove('flash'),1400)});
+document.addEventListener('mouseover',e=>{const c=e.target.closest('button.cite');if(!c||c.title)return;const s=[...(c.closest('.a')?.querySelectorAll('.src')||[])].filter(x=>x.dataset.n===c.dataset.c).at(-1);
   if(s)c.title=(s.querySelector('span')?.textContent||'')+(s.title?'\n'+s.title:'')});
 
 // ---------- message actions: copy, read aloud, regenerate, continue, edit, versions
@@ -1946,12 +1993,14 @@ function replyActs(a,k){a.querySelector(':scope>.mact')?.remove();document.query
   const b=(ic,t,fn,cls)=>{const x=el('button',cls||'',ic);x.title=t;x.onclick=ev=>{ev.stopPropagation();fn(x)};m.append(x);return x};
   b(ICS.copy,'Copier',x=>{navigator.clipboard.writeText(raw());x.innerHTML=ICS.ok;setTimeout(()=>x.innerHTML=ICS.copy,1400)});
   b(ICS.speak,'Lire à voix haute',x=>speak(raw(),x));
-  if(k>=0&&!EPH){b(ICS.regen,'Régénérer la réponse',()=>redo('regen',k));b(ICS.cont,'Continuer la réponse',()=>redo('continue',k),'cont')}
+  if(k>=0&&!EPH)b(ICS.copy,'Créer une discussion depuis cette réponse',()=>forkChat(k,'reply'));
+  if(k>=0&&!EPH&&!CFG.reviewSnapshot){b(ICS.regen,'Régénérer la réponse',()=>redo('regen',k));b(ICS.cont,'Continuer la réponse',()=>redo('continue',k),'cont')}
   a.append(m)}
 function userActs(u,k,text){u.querySelector('.uact')?.remove();if(k<0||EPH)return;const bar=el('div','uact');const v=VERS[String(k)];
+  const fork=el('button','','⑂');fork.title='Créer une discussion depuis ce message';fork.setAttribute('aria-label',fork.title);fork.onclick=()=>forkChat(k,'user');bar.append(fork);
   if(v&&v.n>1){bar.classList.add('vers');const p=el('button','',ICS.prev),n=el('button','',ICS.next);p.title='Version précédente';n.title='Version suivante';
     p.disabled=v.cur<=0;n.disabled=v.cur>=v.n-1;p.onclick=()=>switchVer(k,v.cur-1);n.onclick=()=>switchVer(k,v.cur+1);bar.append(p,el('span','',(v.cur+1)+' / '+v.n),n)}
-  if(text){const ed=el('button','',ICS.edit);ed.title='Modifier le message';ed.onclick=()=>editMsg(u,k,text);bar.append(ed)}
+  if(text&&!CFG.reviewSnapshot){const ed=el('button','',ICS.edit);ed.title='Modifier le message';ed.onclick=()=>editMsg(u,k,text);bar.append(ed)}
   const cp=el('button','',ICS.copy);cp.title='Copier';cp.onclick=()=>{navigator.clipboard.writeText(text);cp.innerHTML=ICS.ok;setTimeout(()=>cp.innerHTML=ICS.copy,1400)};if(text)bar.append(cp);
   u.insertBefore(bar,u.querySelector('.st'))}
 function editMsg(u,k,text){if(busy)return;const box=el('div','uedit');const t=el('textarea');t.value=text;
@@ -1961,16 +2010,19 @@ function editMsg(u,k,text){if(busy)return;const box=el('div','uedit');const t=el
   s.onclick=()=>{const v=t.value.trim();if(v)redo('edit',k,v)};
   t.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();s.click()}if(e.key==='Escape')c.click()}}
 async function switchVer(k,j){if(busy)return;await post('/api/version/switch',{id:SID,k,j});open_(SID)}
+async function forkChat(k,side){if(busy||!SID)return;
+  try{const r=await post('/api/fork',{id:SID,k,side}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);await open_(j.id)}
+  catch(err){alert(err.message)}}
 async function streamTo(url,body){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!r.ok&&!(r.headers.get('content-type')||'').includes('event-stream')){const j=await r.json().catch(()=>({}));throw new Error(j.error||r.status)}
   const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
   for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let i;
     while((i=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+2);if(line.startsWith('data: '))onEvent(JSON.parse(line.slice(6)),true)}}}
-async function redo(mode,k,text){if(busy||!SID)return;busy=true;upd();
+async function redo(mode,k,text){if(busy||document.body.classList.contains('loading-chat')||!SID)return;busy=true;upd();
   if(mode!=='continue'){const u=log.querySelector('.u[data-k="'+k+'"]');if(u){let n=u;while(n){const x=n.nextSibling;n.remove();n=x}}UIDX=k+TBASE-1;lastUser=null}
   T=null;newTurn();showTyping('');
-  try{await streamTo('/api/redo',{id:SID,mode,k,text})}catch(e){onEvent({type:'error',text:'Échec : '+e.message},true)}
+  try{await flushConfig(SID);await streamTo('/api/redo',{id:SID,turnId:crypto.randomUUID(),mode,k,text})}catch(e){onEvent({type:'error',text:'Échec : '+e.message},true)}
   finally{busy=false;if(T)onEvent({type:'done'},true);upd();if(mode!=='continue')open_(SID);else loadList()}}
 
 // ---------- read aloud (Piper voices, offline)
@@ -1986,34 +2038,82 @@ async function speak(text,btn){if(SPK){const same=SPK.btn===btn;SPK.audio.pause(
 
 // ---------- conversation setup chips: assistant, web, documents, instructions
 function renderTools(){const t=$('tools');if(!t)return;t.innerHTML='';
+  $('box').style.display=CFG.reviewSnapshot?'none':'';$('reviewNotice').hidden=!CFG.reviewSnapshot;
   const a=WS.assistants.find(x=>x.id===CFG.assistant);
   const ch=(ic,label,on,fn,title)=>{const b=el('button',on?'on':'',ic+'<span>'+esc(label)+'</span>');b.title=title||'';b.onclick=ev=>{ev.stopPropagation();fn(b)};t.append(b);return b};
   ch(a?'<span>'+esc(a.emoji||'🤖')+'</span>':ICS.person,a?a.name:tr('Assistant'),!!a,assistantMenu,'Choisir un assistant (rôle, documents, web)');
-  ch(ICS.globe,tr('Web'),CFG.web,()=>{CFG.web=!CFG.web;saveCfg()},'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
-  const nd=CFG.docs.length;ch(ICS.books,nd?tr('Documents')+' ('+nd+')':tr('Documents'),nd>0,docsMenu,'Répondre à partir de tes documents');
+  const web=!CFG.web_blocked&&!!(CFG.web||a?.web);ch(ICS.globe,tr('Web')+(a?.web?' · '+tr('Assistant'):''),web,()=>{CFG.web=!web;CFG.web_blocked=web;saveCfg('web','web_blocked')},'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
+  const nd=WS.knowledge.filter(c=>(CFG.docs.includes(c.id)||a?.docs?.includes(c.id))&&!CFG.excluded_docs.includes(c.id)).length;ch(ICS.books,nd?tr('Documents')+' ('+nd+')':tr('Documents'),nd>0,docsMenu,'Répondre à partir de tes documents');
   ch(ICS.note,tr('Instructions'),!!CFG.system,openSysd,'Instructions pour cette conversation')}
-async function saveCfg(){renderTools();if(SID&&!EPH)await post('/api/config',{id:SID,config:CFG})}
+// Serialize preference edits for each conversation. A pending revocation precedes any new turn.
+const configWrites=new Map();
+let creatingChat=null;
+function updateLocalConfig(config,patch){
+  if(!patch.document_choice){Object.assign(config,patch);return}
+  const {id,selected}=patch.document_choice;
+  const inherited=WS.assistants.find(a=>a.id===config.assistant)?.docs||[];
+  config.docs=config.docs.filter(cid=>cid!==id);
+  config.excluded_docs=config.excluded_docs.filter(cid=>cid!==id);
+  if(!selected)config.excluded_docs.push(id);
+  else if(!inherited.includes(id))config.docs.push(id);
+}
+function flushConfig(id,changes=[]){
+  let state=configWrites.get(id);
+  if(!state){if(!changes.length)return Promise.resolve();state={pending:[],writing:null};configWrites.set(id,state)}
+  state.pending.push(...changes);
+  if(!state.writing){
+    state.writing=(async()=>{
+      while(state.pending.length){
+        const patch=state.pending[0];
+        const r=await post('/api/config',{id,changes:patch});const body=await r.json();
+        if(!r.ok){
+          if(r.status>=400&&r.status<500)state.pending.shift();
+          throw new Error(body.error||r.statusText)
+        }
+        state.pending.shift();
+        if(SID===id){CFG=Object.assign(CFG0(),body.config);state.pending.forEach(next=>updateLocalConfig(CFG,next));renderTools()}
+      }
+    })().finally(()=>{state.writing=null;if(!state.pending.length)configWrites.delete(id)});
+  }
+  return state.writing;
+}
+function saveChange(change){
+  renderTools();
+  if(SID)return flushConfig(SID,[change]).catch(e=>alert(e.message));
+  if(creatingChat)creatingChat.push(change);
+}
+function saveCfg(...fields){
+  return saveChange(Object.fromEntries(fields.map(key=>[key,structuredClone(CFG[key])])));
+}
+async function createChat(){
+  const duringCreation=creatingChat=[];
+  try{
+    const r=await post('/api/new',{ephemeral:EPH,config:CFG}),body=await r.json();
+    if(!r.ok||!body.id)throw new Error(body.error||r.statusText);
+    SID=body.id;if(!EPH){try{localStorage.setItem('sparky.sid',SID)}catch{}}
+    await flushConfig(SID,duringCreation);
+  }finally{creatingChat=null}
+}
 function menuAt(anchor,build){const m=$('menu');m.innerHTML='';build(m);m.style.display='block';const r=anchor.getBoundingClientRect();
   const h=m.offsetHeight,w=m.offsetWidth;m.style.left=Math.max(8,Math.min(innerWidth-w-8,r.left))+'px';m.style.top=(r.bottom+h+8<innerHeight?r.bottom+4:Math.max(8,r.top-h-4))+'px'}
 document.addEventListener('click',e=>{if(!e.target.closest('#menu'))$('menu').style.display='none'});
 const mItem=(m,html,fn,cls)=>{const b=el('button',cls||'',html);b.onclick=ev=>{ev.stopPropagation();$('menu').style.display='none';fn()};m.append(b);return b};
 function assistantMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Assistant')));
-  mItem(m,(CFG.assistant?'':'✓ ')+esc(tr('Par défaut (Sparky)')),()=>{CFG.assistant=null;saveCfg()});
-  WS.assistants.forEach(a=>mItem(m,(CFG.assistant===a.id?'✓ ':'')+esc((a.emoji||'🤖')+' '+a.name),()=>{CFG.assistant=a.id;saveCfg()}));
+  mItem(m,(CFG.assistant?'':'✓ ')+esc(tr('Par défaut (Sparky)')),()=>{CFG.assistant=null;saveCfg('assistant')});
+  WS.assistants.forEach(a=>mItem(m,(CFG.assistant===a.id?'✓ ':'')+esc((a.emoji||'🤖')+' '+a.name),()=>{CFG.assistant=a.id;saveCfg('assistant')}));
   m.append(el('hr'));mItem(m,esc(tr('Gérer les assistants…')),()=>openWs('assistants'))})}
 function docsMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Répondre à partir de')));
   if(!WS.knowledge.length)m.append(el('div','hd',tr('Aucune collection pour l’instant.')));
-  WS.knowledge.forEach(c=>{const l=el('label');const x=el('input');x.type='checkbox';x.checked=CFG.docs.includes(c.id);
-    x.onchange=()=>{CFG.docs=x.checked?[...CFG.docs,c.id]:CFG.docs.filter(i=>i!==c.id);saveCfg()};l.append(x,document.createTextNode(c.name+' ('+c.docs.length+')'));l.onclick=e=>e.stopPropagation();m.append(l)});
+  const preset=WS.assistants.find(a=>a.id===CFG.assistant)?.docs||[];
+  WS.knowledge.forEach(c=>{const l=el('label');const x=el('input');x.type='checkbox';x.checked=(CFG.docs.includes(c.id)||preset.includes(c.id))&&!CFG.excluded_docs.includes(c.id);
+    x.onchange=()=>{const change={document_choice:{id:c.id,selected:x.checked}};updateLocalConfig(CFG,change);saveChange(change)};
+    l.append(x,document.createTextNode(c.name+' ('+c.docs.length+')'+(preset.includes(c.id)?' · '+tr('Assistant'):'')));l.onclick=e=>e.stopPropagation();m.append(l)});
   m.append(el('hr'));mItem(m,esc(tr('Ajouter des documents…')),()=>openWs('knowledge'))})}
 function openSysd(){$('sysT').value=CFG.system||'';$('sysd').style.display='grid';$('sysT').focus()}
 $('sysX').onclick=()=>$('sysd').style.display='none';
-$('sysOk').onclick=()=>{CFG.system=$('sysT').value.trim();$('sysd').style.display='none';saveCfg()};
+$('sysOk').onclick=()=>{CFG.system=$('sysT').value.trim();$('sysd').style.display='none';saveCfg('system')};
 $('sysd').onclick=e=>{if(e.target.id==='sysd')$('sysd').style.display='none'};
 
-// the setup chosen before the first message goes with it
-const _fetch0=window.fetch;
-window.fetch=function(u,o){if(u==='/api/chat'&&o?.body){try{const b=JSON.parse(o.body);b.config=CFG;o={...o,body:JSON.stringify(b)}}catch{}}return _fetch0(u,o)};
 
 // ---------- "/" prompt library
 let SL={on:false,i:0,items:[]};
@@ -2039,25 +2139,28 @@ loadList=async function(){const q=$('cq')?.value.trim();const box=$('list');
     box.append(el('div','h',l.length?tr('Résultats'):tr('Aucun résultat')));l.forEach(s=>box.append(cvRow(s,s.snippet)));return}
   const l=await(await fetch('/api/sessions')).json();box.innerHTML='';
   const pinned=l.filter(s=>s.pinned),folders=[...new Set(l.filter(s=>s.folder&&!s.pinned).map(s=>s.folder))].sort(),rest=l.filter(s=>!s.pinned&&!s.folder);
-  const group=(title,items,key,icon)=>{if(!items.length)return;const h=el('div','h'+(key?' fold':''),(icon||'')+esc(title)+(key?' <span style="margin-left:auto">'+(FOLD[key]?'▸':'▾')+'</span>':''));
-    box.append(h);if(key)h.onclick=()=>{FOLD[key]=!FOLD[key];try{localStorage.setItem('sparky.fold',JSON.stringify(FOLD))}catch{}loadList()};
+  const group=(title,items,key,icon)=>{if(!items.length)return;const h=el(key?'button':'div','h'+(key?' fold':''),(icon||'')+esc(title)+(key?' <span style="margin-left:auto">'+(FOLD[key]?'▸':'▾')+'</span>':''));
+    box.append(h);if(key){h.dataset.folder=key;h.setAttribute('aria-expanded',String(!FOLD[key]));h.onclick=async()=>{FOLD[key]=!FOLD[key];try{localStorage.setItem('sparky.fold',JSON.stringify(FOLD))}catch{}await loadList();[...box.querySelectorAll('[data-folder]')].find(b=>b.dataset.folder===key)?.focus()}}
     if(!key||!FOLD[key])items.forEach(s=>box.append(cvRow(s)))};
   group(tr('Épinglées'),pinned);folders.forEach(f=>group(f,l.filter(s=>s.folder===f&&!s.pinned),'f:'+f,ICS.folder+' '));group(tr('Conversations'),rest)};
-function cvRow(s,snip){const d=el('div','cv'+(s.id===SID?' on':''));const t=el('div','cvt');
+function cvRow(s,snip){const d=el('div','cv'+(s.id===SID?' on':''));const t=el('button','cvt');
   t.innerHTML=(s.pinned?'<span class="pin">'+ICS.pin+'</span>':'')+'<span>'+esc(s.title)+'</span>'+(snip?'<small>'+esc(snip)+'</small>':'');
   if(s.pinned)t.firstChild.style.float='left';d.append(t);
   const x=el('button','',ICS.dots);x.title='Options';x.onclick=ev=>{ev.stopPropagation();cvMenu(x,s)};d.append(x);
-  d.onclick=()=>{open_(s.id);if(matchMedia('(max-width:760px)').matches)setSide(false)};return d}
+  t.onclick=()=>{open_(s.id);if(matchMedia('(max-width:760px)').matches)setSide(false)};return d}
 function cvMenu(b,s){menuAt(b,m=>{
   mItem(m,esc(tr('Renommer')),async()=>{const t=prompt(tr('Nouveau nom :'),s.title);if(t!=null&&t.trim()){await post('/api/meta',{id:s.id,title:t.trim()});loadList()}});
   mItem(m,esc(tr(s.pinned?'Désépingler':'Épingler')),async()=>{await post('/api/meta',{id:s.id,pinned:!s.pinned});loadList()});
   mItem(m,esc(tr('Déplacer dans un dossier…')),async()=>{const f=prompt(tr('Nom du dossier (vide pour le retirer) :'),s.folder||'');if(f!=null){await post('/api/meta',{id:s.id,folder:f.trim()||null});loadList()}});
   m.append(el('hr'));
-  mItem(m,esc(tr('Exporter (JSON)')),()=>location.href='/api/export?id='+encodeURIComponent(s.id));
+  mItem(m,esc(tr('Partager une copie JSON (sources internes retirées)')),()=>location.href='/api/export?id='+encodeURIComponent(s.id));
+  mItem(m,esc(tr('Sauvegarder ce fil avec ses sources…')),()=>{
+    if(confirm(tr('Cette sauvegarde locale contient les passages cités et peut révéler le contenu de vos documents. La restauration redemande les autorisations. Continuer ?')))
+      location.href='/api/export?fmt=backup&id='+encodeURIComponent(s.id)});
   mItem(m,esc(tr('Exporter (Markdown)')),()=>location.href='/api/export?fmt=md&id='+encodeURIComponent(s.id));
   m.append(el('hr'));
   mItem(m,esc(tr('Supprimer')),async()=>{if(!confirm('Supprimer « '+s.title+' » ?\nSes images seront effacées.'))return;
-    await post('/api/delete',{id:s.id});if(s.id===SID)blank(false);else loadList()},'bad')})}
+    const r=await post('/api/delete',{id:s.id});if(!r.ok)return alert((await r.json()).error||r.statusText);if(s.id===SID)blank(false);else loadList()},'bad')})}
 let cqT=0;$('cq').addEventListener('input',()=>{clearTimeout(cqT);cqT=setTimeout(loadList,250)});
 $('cq').addEventListener('keydown',e=>{if(e.key==='Escape'){$('cq').value='';loadList()}});
 $('impBtn').onclick=()=>$('impFile').click();
@@ -2103,12 +2206,14 @@ function wsPrompts(B){B.append(el('p','wsnote',tr('Tape « / » dans la zone de 
 const fsize=n=>n>=1048576?(n/1048576).toFixed(1)+' Mo':Math.max(1,Math.round(n/1024))+' Ko';
 function wsKnowledge(B){B.append(el('p','wsnote',tr('Ajoute des PDF, documents Office, textes, code… Sparky les découpe et les indexe sur ton PC. Active ensuite « Documents » sous la zone de message : les réponses citent leurs sources [1].')));
   const L=el('div','wsl');B.append(L);let indexing=false;
-  WS.knowledge.forEach(c=>{const d=wsItem('📚',c.name,c.docs.length+' '+tr('document(s)'),[['Ajouter des fichiers',()=>pick(c.id)],['Renommer',async()=>{const n=prompt(tr('Nouveau nom :'),c.name);if(n){await wsSave({what:'collection',action:'rename',id:c.id,name:n});renderWs()}}],
+  WS.knowledge.forEach(c=>{const d=wsItem('📚',c.name,c.docs.length+' '+tr('document(s)'),[['Ajouter des fichiers',()=>pick(c.id)],[c.folder?'Modifier le dossier':'Synchroniser un dossier',async()=>{
+      const folder=prompt(tr('Chemin complet du dossier local à synchroniser. Les fichiers ajoutés ou modifiés seront indexés. Videz le chemin pour retirer les documents synchronisés.'),c.folder||'');
+      if(folder!==null){await wsSave({what:'collection',action:'folder',id:c.id,folder:folder.trim()});renderWs()}}],['Renommer',async()=>{const n=prompt(tr('Nouveau nom :'),c.name);if(n){await wsSave({what:'collection',action:'rename',id:c.id,name:n});renderWs()}}],
     ['Supprimer',async()=>{if(confirm(tr('Supprimer cette collection et ses documents ?'))){await wsSave({what:'collection',action:'delete',id:c.id});renderWs()}},'del']]);
     const docs=el('div','docs');c.docs.forEach(x=>{const r=el('div','doc');if(x.state==='indexing')indexing=true;
       r.append(el('span','',esc(x.name)),el('em',x.state==='error'?'err':'',x.state==='ready'?x.chunks+' '+tr('passages')+' · '+fsize(x.size):x.state==='indexing'?tr('indexation…'):esc(x.error||tr('erreur'))));
       const del=el('button','','×');del.title=tr('Retirer');del.onclick=async()=>{await wsSave({what:'document',action:'delete',id:x.id});renderWs()};r.append(del);docs.append(r)});
-    d.querySelector('.n').append(docs);L.append(d)});
+    if(c.folder){const progress=el('small');progress.textContent=c.folder+' · '+(c.last_sync?new Date(c.last_sync*1000).toLocaleString()+' · '+c.sync_status:tr('Synchronisation en attente'));d.querySelector('.n').append(progress);indexing=true}d.querySelector('.n').append(docs);L.append(d)});
   const add=el('button','wsbtn','+ '+tr('Nouvelle collection'));add.style.marginTop='10px';
   add.onclick=async()=>{const n=prompt(tr('Nom de la collection :'),tr('Mes documents'));if(n){const r=await wsSave({what:'collection',name:n});renderWs().then(()=>pick(r.id))}};B.append(add);
   if(indexing)wsTimer=setTimeout(()=>{if($('ws').classList.contains('open')&&WTAB==='knowledge')renderWs()},2000);
@@ -2131,14 +2236,22 @@ function wsTools(B){const st=WS.mcp.status||[];
   if(st.some(x=>x.state==='starting'))wsTimer=setTimeout(()=>{if($('ws').classList.contains('open')&&WTAB==='tools')renderWs()},2000)}
 const DAYS=['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'];
 function whenText(w){return w.type==='daily'?tr('chaque jour à')+' '+w.time:w.type==='weekly'?tr('chaque')+' '+tr(DAYS[w.day])+' '+tr('à')+' '+w.time:w.type==='interval'?tr('toutes les')+' '+w.minutes+' min':tr('une fois, le')+' '+new Date(w.at*1000).toLocaleString()}
-function wsTasks(B){B.append(el('p','wsnote',tr('Sparky exécute un prompt à heure fixe (ex. « résume l’actualité tech du jour ») et range la réponse dans une nouvelle conversation. Sparky doit rester ouvert. Les tâches ont accès au web.')));
+function wsTasks(B){B.append(el('p','wsnote',tr('Choisis le modèle et les outils de la tâche. Pour une synthèse à valider, choisis une collection. Sparky doit rester ouvert.')));
   const L=el('div','wsl');B.append(L);
   WS.schedules.forEach(t=>{const sub=whenText(t.when)+(t.enabled?(t.next_run?' · '+tr('prochaine :')+' '+new Date(t.next_run*1000).toLocaleString():''):' · '+tr('en pause'))
       +(t.last_run?' · '+tr('dernière :')+' '+new Date(t.last_run*1000).toLocaleString():'')+(t.last_error?' · ⚠ '+t.last_error:'');
-    const btns=[['Lancer maintenant',async()=>{await wsSave({what:'schedule',action:'run',id:t.id});setTimeout(renderWs,1000)}]];
+    const phase=t.run?.phase,review=phase==='review',running=phase==='search'||phase==='summarize';
+    const phases={search:'Recherche documentaire',summarize:'Synthèse en cours',review:'En attente de validation',approved:'Synthèse validée',rejected:'Synthèse refusée',cancelled:'Séquence annulée'};
+    const btns=review||running?[]:[['Lancer maintenant',async()=>{await wsSave({what:'schedule',action:'run',id:t.id});setTimeout(renderWs,1000)}]];
+    if(running)btns.push(['Annuler la séquence',async()=>{await wsSave({what:'schedule',action:'cancel',id:t.id,run:t.run.id});renderWs()}]);
     if(t.last_session)btns.push([(WS.unread||[]).includes(t.id)?'Voir le résultat •':'Voir le résultat',async()=>{await wsSave({what:'schedule',action:'read',id:t.id});$('ws').classList.remove('open');open_(t.last_session);loadWS()}]);
-    btns.push(['Modifier',()=>form(t)],['Supprimer',async()=>{await wsSave({what:'schedule',action:'delete',id:t.id});renderWs()},'del']);
-    L.append(wsItem('⏰',t.title,sub,btns))});
+    if(review)for(const [decision,title] of [['approved','Valider cette synthèse'],['rejected','Refuser cette synthèse']]){
+      btns.push([title,async()=>{await wsSave({what:'schedule',action:'review',id:t.id,run:t.run.id,decision});renderWs()}]);}
+    if(!review&&!running)btns.push(['Modifier',()=>form(t)]);
+    btns.push(['Supprimer',async()=>{await wsSave({what:'schedule',action:'delete',id:t.id});renderWs()},'del']);
+    L.append(wsItem('⏰',t.title,sub+(phases[phase]?' · '+tr(phases[phase]):''),btns))});
+  if(WS.schedules.some(t=>['search','summarize'].includes(t.run?.phase)))wsTimer=setTimeout(()=>{
+    if($('ws').classList.contains('open')&&WTAB==='tasks'&&!B.querySelector('.wsf'))renderWs()},1500);
   const add=el('button','wsbtn','+ '+tr('Nouvelle tâche'));add.style.marginTop='10px';add.onclick=()=>form({when:{type:'daily',time:'08:00'},enabled:true});B.append(add);
   function form(t){B.querySelector('.wsf')?.remove();const f=el('div','wsf'),w=t.when||{};
     const ti=inp('text',t.title,'Revue de presse'),pr=inp('textarea',t.prompt,'Fais-moi un résumé des 5 actualités tech les plus importantes du jour, avec les sources.');
@@ -2148,10 +2261,19 @@ function wsTasks(B){B.append(el('p','wsnote',tr('Sparky exécute un prompt à he
     const en=el('label','ck');const ec=inp('checkbox');ec.checked=t.enabled!==false;en.append(ec,document.createTextNode(tr('Activée')));
     const r=el('div','row2'),fT=field('Heure',tm),fD=field('Jour',dy),fM=field('Minutes',mn),fA=field('Date et heure',at);r.append(field('Quand',ty),fD,fT,fM,fA);
     const vis=()=>{const v=ty.value;fT.style.display=['daily','weekly'].includes(v)?'':'none';fD.style.display=v==='weekly'?'':'none';fM.style.display=v==='interval'?'':'none';fA.style.display=v==='once'?'':'none'};ty.onchange=vis;vis();
-    f.append(field('Titre',ti),field('Prompt',pr),r,en);
+    const model=el('select');model.add(new Option(tr('Modèle actif au démarrage de la tâche'),''));
+    const models=WS.task_models||[];for(const m of models)model.add(new Option(m.label,m.id));
+    if(t.model&&!models.some(m=>m.id===t.model))model.add(new Option(t.model,t.model));model.value=t.model||'';
+    const collection=el('select');collection.add(new Option(tr('Tâche simple'),''));
+    for(const c of WS.knowledge)collection.add(new Option(c.name,String(c.id)));
+    if(t.collection!=null&&!WS.knowledge.some(c=>c.id===t.collection))collection.add(new Option(tr('Collection indisponible'),String(t.collection)));
+    collection.value=t.collection==null?'':String(t.collection);
+    const wc=inp('checkbox'),wl=el('label','ck');wc.checked=t.web??!!t.id;wl.append(wc,document.createTextNode(tr('Accès au web (recherche, lecture de liens)')));
+    collection.onchange=()=>{wc.disabled=!!collection.value};collection.onchange();
+    f.append(field('Titre',ti),field('Prompt',pr),field('Modèle',model),field('Synthèse à valider',collection),wl,r,en);
     const acts=el('div','acts'),c=el('button','wsbtn',tr('Annuler')),s=el('button','wsbtn',tr('Enregistrer'));acts.append(c,s);f.append(acts);c.onclick=()=>f.remove();
     s.onclick=async()=>{const v=ty.value,when=v==='daily'?{type:v,time:tm.value}:v==='weekly'?{type:v,day:+dy.value,time:tm.value}:v==='interval'?{type:v,minutes:+mn.value}:{type:v,at:new Date(at.value).getTime()/1000};
-      await wsSave({what:'schedule',item:{id:t.id,title:ti.value,prompt:pr.value,when,enabled:ec.checked}});renderWs()};B.append(f);ti.focus()}}
+      await wsSave({what:'schedule',item:{id:t.id,title:ti.value,prompt:pr.value,when,enabled:ec.checked,model:model.value||null,web:!wc.disabled&&wc.checked,collection:collection.value?Number(collection.value):null}});renderWs()};B.append(f);ti.focus()}}
 function wsApi(B){const a=WS.api;
   B.append(el('p','wsnote',tr('Une API compatible OpenAI pour utiliser le modèle actif de Sparky depuis d’autres applications (Continue, extensions VS Code, scripts…). Elle n’écoute que sur ce PC.')));
   const f=el('div','wsf');const on=el('label','ck');const oc=inp('checkbox');oc.checked=a.enabled;on.append(oc,document.createTextNode(tr('Activer l’API locale')));
@@ -2203,7 +2325,7 @@ function jobCard(j){const d=el('div','stj'+(j.state==='error'?' err':''));d.data
   d.innerHTML='<div class="r1">'+(j.state==='error'?'⚠':'<span class="spin"></span>')+'<span>'+esc(what)+(j.mode==='video'?' · '+j.seconds+' s':'')+' · '+esc(j.aspect)+'</span></div>'
     +'<p>'+esc(j.final_prompt||j.prompt)+'</p>'+(j.state==='error'?'<small style="color:var(--bad)">'+esc(j.error||'')+'</small>':
     '<div class="bar"><span style="width:'+Math.round((j.progress||0.02)*100)+'%"></span></div><small>'+esc(tr(st))+(j.elapsed?' '+j.elapsed+' s'+(j.est?' / ~'+Math.round(j.est)+' s':''):'')+'</small>');
-  if(j.state==='queued'){const x=el('button','x',esc(tr('Annuler')));x.onclick=async e=>{e.stopPropagation();await post('/api/studio/cancel',{id:j.id});loadStudio()};d.append(x)}
+  if(j.state==='queued'||j.state==='running'){const x=el('button','x',esc(tr('Annuler')));x.onclick=async e=>{e.stopPropagation();x.disabled=true;await post('/api/studio/cancel',{id:j.id});loadStudio()};d.append(x)}
   if(j.state==='error'){const x=el('button','x',esc(tr('Masquer')));x.onclick=e=>{e.stopPropagation();j.state='hidden';ST.doneIds.add(j.id);d.remove()};d.append(x)}
   return d}
 function renderJobs(){const g=$('stGrid');g.querySelectorAll('.stj').forEach(x=>x.remove());const first=g.firstChild;
@@ -2270,7 +2392,7 @@ const ICPC='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="
 function pcMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Accès à l’ordinateur')));
   Object.entries(PCL).forEach(([k,[t,d]])=>{const x=mItem(m,(CFG.computer===k?'✓ ':'')+'<span>'+esc(tr(t))+(k==='ask'?' ★':'')+'<small>'+esc(tr(d))+'</small></span>',()=>{
       if(k==='full'&&!confirm(tr('Accès complet : Sparky pourra modifier, déplacer, mettre à la corbeille, ouvrir des applications et lancer des commandes sans te demander.\n\nLes dossiers système restent protégés et rien n’est supprimé définitivement. Continuer ?')))return;
-      CFG.computer=k;saveCfg()});x.classList.add('lv')})})}
+      CFG.computer=k;saveCfg('computer')});x.classList.add('lv')})})}
 const _renderTools0=renderTools;
 renderTools=function(){_renderTools0();const t=$('tools');if(!t)return;const lv=CFG.computer||'off';
   const b=el('button',lv==='off'?'':(lv==='full'?'on pc-full':'on'),ICPC+'<span>'+esc(tr('Ordinateur'))+(lv==='off'?'':' · '+esc(tr(PCL[lv][0].split(',')[0])))+'</span>');
@@ -2279,7 +2401,7 @@ renderTools=function(){_renderTools0();const t=$('tools');if(!t)return;const lv=
 const PCIC={read:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
   write:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
   danger:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>'};
-const APPR={};
+const APPR=Object.create(null);
 const _onEvent1=onEvent;
 onEvent=function(e,live){
   if(e.type==='ctool'){if(!T)newTurn();hideTyping();const d=el('div','pcs '+(e.risk||'read'));
@@ -2290,11 +2412,13 @@ onEvent=function(e,live){
       +(e.preview?'<details><summary>'+esc(tr('Contenu qui sera écrit'))+'</summary><code>'+esc(e.preview)+'</code></details>':'');
     const b=el('div','b'),res=el('div','res');
     [['once','Autoriser','go'],['always','Toujours pour cette conversation',''],['deny','Refuser','no']].forEach(([k,t,cls])=>{const x=el('button',cls,esc(tr(t)));
-      x.onclick=async()=>{b.querySelectorAll('button').forEach(y=>y.disabled=true);const r=await post('/api/approve',{id:SID,aid:e.id,decision:k});
+      x.onclick=async()=>{b.querySelectorAll('button').forEach(y=>y.disabled=true);const id=SID;
+        if(k!=='deny'){try{await flushConfig(id)}catch(err){res.textContent=err.message;b.querySelectorAll('button').forEach(y=>y.disabled=false);return}}
+        const r=await post('/api/approve',{id,aid:e.id,decision:k});
         if(!r.ok){res.textContent=tr('Demande expirée.');}};b.append(x)});
     if(!live){b.querySelectorAll('button').forEach(y=>y.disabled=true);res.textContent=tr('Demande expirée.')}
     d.append(b,res);A().append(d);if(T.pc)T.pc.querySelector('.st').textContent=tr('en attente de ton accord');down(true);return}
-  if(e.type==='approved'){const d=APPR[e.id];if(d){d.classList.add('done');d.querySelector('.b').remove();
+  if(e.type==='approved'){const d=APPR[e.id];if(d){delete APPR[e.id];d.classList.add('done');d.querySelector('.b')?.remove();
       d.querySelector('.res').textContent=tr({once:'✓ Autorisé',always:'✓ Autorisé pour toute la conversation',deny:'✗ Refusé'}[e.decision]||'✗ Refusé')}
     if(live&&e.decision!=='deny')showTyping('');return}
   if(e.type==='cresult'){const d=T?.pc;if(d){const st=d.querySelector('.st');st.className='st '+(e.ok?'ok':'err');st.textContent=e.ok?'✓':'✗ '+(e.text||'');

@@ -6,10 +6,17 @@
   audio and video transcribed offline with Whisper (decoded by PyAV)
 Images do not come here: the UI sends them as pictures the assistant can see.
 """
-import base64, html, io, os, re, threading, time, uuid, zipfile
+import base64, io, os, re, threading, time, uuid, zipfile
+from xml.parsers import expat
 
 MAX_CHARS = 40000          # per file (~10k tokens): the context of the assistant is 32k tokens
 MAX_BYTES = 200 * 2**20
+MAX_OFFICE_DIRECTORY = 2 * 2**20
+MAX_OFFICE_MEMBERS = 4096
+MAX_OFFICE_PART = 16 * 2**20    # uncompressed bytes of one text-bearing XML part
+MAX_OFFICE_XML = 32 * 2**20     # cumulative uncompressed XML bytes per document
+MAX_XML_DEPTH = 128
+MAX_SHEET_TEXT = 8_000_000      # shared strings can be referenced by many cells
 TEXT_EXT = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
             ".conf", ".log", ".py", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".scss", ".java", ".kt", ".c",
             ".h", ".cpp", ".hpp", ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".sql", ".sh", ".bat", ".ps1", ".r", ".lua",
@@ -21,6 +28,27 @@ OFFICE = {".docx": "word/document.xml", ".pptx": "ppt/slides/", ".xlsx": "xl/sha
 
 files = {}   # id -> {"name", "kind", "state": "reading|ok|error", "text", "error", "chars", "truncated", "t"}
 _lock = threading.Lock()
+_readers = threading.BoundedSemaphore(2)  # shared by chat attachments and RAG imports
+READERS_BUSY = "lecteurs de documents occupés, réessaie dans un instant"
+
+
+def start_reader(target, *args):
+    """Reject excess jobs before creating a thread or queuing another large document."""
+    if not _readers.acquire(blocking=False):
+        return False
+
+    def run():
+        try:
+            target(*args)
+        finally:
+            _readers.release()
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except RuntimeError:  # the OS could not start the thread
+        _readers.release()
+        return False
+    return True
 
 
 def kind_of(name, mime=""):
@@ -52,37 +80,170 @@ def _looks_text(data):
     return b"\x00" not in head and (not head or sum(32 <= b < 127 or b in (9, 10, 13) or b >= 128 for b in head) / len(head) > 0.95)
 
 
+def _parse_office_xml(xml, start, end, text):
+    """Consume SAX-style events from a bounded XML part, without a tree, DTD, or external entities."""
+    parser = expat.ParserCreate()
+    depth = 0
+
+    def on_start(name, attrs):
+        nonlocal depth
+        depth += 1
+        if depth > MAX_XML_DEPTH:
+            raise ValueError("XML Office trop imbriqué")
+        start(name.rsplit(":", 1)[-1], attrs)
+
+    def on_end(name):
+        nonlocal depth
+        end(name.rsplit(":", 1)[-1])
+        depth -= 1
+
+    def refuse_doctype(*args):
+        raise ValueError("DTD interdit dans le XML Office")
+
+    parser.StartDoctypeDeclHandler = refuse_doctype
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartElementHandler, parser.EndElementHandler = on_start, on_end
+    parser.CharacterDataHandler = text
+    try:
+        parser.Parse(xml, True)
+    except expat.ExpatError as e:
+        raise ValueError("XML Office mal formé") from e
+
+
 def _xml_text(xml):
-    xml = re.sub(r"</(w:p|a:p|text:p|text:h|row)>", "\n", xml)
-    xml = re.sub(r"<(w:tab|text:tab)/>", "\t", xml)
-    return html.unescape(re.sub(r"<[^>]+>", "", xml))
+    out = io.StringIO()
+
+    def start(tag, attrs):
+        if tag == "tab":
+            out.write("\t")
+
+    def end(tag):
+        if tag in ("p", "h", "row"):
+            out.write("\n")
+
+    _parse_office_xml(xml, start, end, out.write)
+    return out.getvalue()
+
+
+def _sheet_values(xml, shared, write=None):
+    """Collect an XLSX string table, or emit worksheet values one cell at a time."""
+    record = "c" if write else "si"
+    buffer = capture = None
+    shared_index = False
+    cells = None
+
+    def start(tag, attrs):
+        nonlocal buffer, capture, shared_index, cells
+        if tag == "row" and write:
+            if cells is not None:
+                raise ValueError("ligne imbriquée dans le classeur")
+            cells = 0
+            write("\n")
+        elif tag == record:
+            if buffer is not None or (write and cells is None):
+                raise ValueError("valeur mal placée dans le classeur")
+            buffer = io.StringIO()
+            shared_index = attrs.get("t") == "s"
+        elif buffer is not None and tag in ("t", "v"):
+            capture = tag
+
+    def text(value):
+        if capture:
+            buffer.write(value)
+
+    def end(tag):
+        nonlocal buffer, capture, cells
+        if tag == capture:
+            capture = None
+        elif tag == "row" and write:
+            cells = None
+        elif tag == record:
+            value = buffer.getvalue()
+            buffer = None
+            if not write:
+                shared.append(value)
+                return
+            if shared_index:
+                index = value.strip()
+                if not index.isascii() or not index.isdecimal():
+                    raise ValueError("référence de chaîne partagée invalide")
+                index = index.lstrip("0") or "0"
+                if len(index) > 8 or int(index) >= len(shared):
+                    raise ValueError("référence de chaîne partagée invalide")
+                value = shared[int(index)]
+            if cells:
+                write("\t")
+            write(value)
+            cells += 1
+
+    _parse_office_xml(xml, start, end, text)
+
+
+class _OfficeInput(io.BytesIO):
+    """Bound ZipFile's eager central-directory read; member data is read in small blocks."""
+    def __init__(self, data):
+        super().__init__(data)
+        self.length = len(data)
+
+    def read(self, size=-1):
+        if size < 0:
+            size = self.length - self.tell()
+        if size > MAX_OFFICE_DIRECTORY:
+            raise ValueError("répertoire ZIP trop volumineux")
+        return super().read(size)
 
 
 def _office(data, ext):
-    z = zipfile.ZipFile(io.BytesIO(data))
+    if len(data) > MAX_BYTES:
+        raise ValueError("document trop volumineux")
+    with zipfile.ZipFile(_OfficeInput(data)) as z:
+        names = z.namelist()
+        if len(names) > MAX_OFFICE_MEMBERS or len(set(names)) != len(names):
+            raise ValueError("archive Office trop complexe ou ambiguë")
+        remaining = MAX_OFFICE_XML
+
+        def read_xml(name):
+            nonlocal remaining
+            info = z.getinfo(name)
+            limit = min(MAX_OFFICE_PART, remaining)
+            if info.file_size > limit or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise ValueError("taille ou compression XML Office non prise en charge")
+            data = bytearray()
+            with z.open(info) as part:
+                while block := part.read(min(65536, limit - len(data) + 1)):
+                    if len(data) + len(block) > limit:
+                        raise ValueError("limite de décompression Office dépassée")
+                    data.extend(block)
+            remaining -= len(data)
+            return data
+
+        return _office_text(ext, names, read_xml)
+
+
+def _office_text(ext, names, read_xml):
     if ext == ".pptx":
-        slides = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+        slides = sorted((n for n in names if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
                         key=lambda n: int(re.findall(r"\d+", n)[-1]))
-        return "\n\n".join(f"--- Diapositive {i + 1} ---\n" + _xml_text(z.read(n).decode("utf-8", "replace")).strip()
+        return "\n\n".join(f"--- Diapositive {i + 1} ---\n" + _xml_text(read_xml(n)).strip()
                            for i, n in enumerate(slides))
     if ext == ".xlsx":  # shared strings + inline values of each sheet, row by row
-        shared = re.findall(r"<si>(.*?)</si>", z.read("xl/sharedStrings.xml").decode("utf-8", "replace"), re.S) \
-            if "xl/sharedStrings.xml" in z.namelist() else []
-        shared = [html.unescape(re.sub(r"<[^>]+>", "", s)) for s in shared]
-        out = []
-        for n in sorted(x for x in z.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", x)):
-            out.append("--- Feuille " + re.findall(r"\d+", n)[-1] + " ---")
-            for row in re.findall(r"<row[^>]*>(.*?)</row>", z.read(n).decode("utf-8", "replace"), re.S):
-                cells = []
-                for attrs, body in re.findall(r"<c([^>]*)>(.*?)</c>", row, re.S):
-                    v = re.search(r"<v>(.*?)</v>", body) or re.search(r"<t[^>]*>(.*?)</t>", body)
-                    val = html.unescape(v.group(1)) if v else ""
-                    if 't="s"' in attrs and val.isdigit() and int(val) < len(shared):
-                        val = shared[int(val)]
-                    cells.append(val)
-                out.append("\t".join(cells))
-        return "\n".join(out)
-    return _xml_text(z.read(OFFICE[ext]).decode("utf-8", "replace"))
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            _sheet_values(read_xml("xl/sharedStrings.xml"), shared)
+        out = io.StringIO()
+
+        def write(text):
+            if out.tell() + len(text) > MAX_SHEET_TEXT:
+                raise ValueError("texte du classeur trop volumineux")
+            out.write(text)
+
+        for n in sorted(x for x in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", x)):
+            if out.tell():
+                write("\n")
+            write("--- Feuille " + re.findall(r"\d+", n)[-1] + " ---")
+            _sheet_values(read_xml(n), shared, write)
+        return out.getvalue()
+    return _xml_text(read_xml(OFFICE[ext]))
 
 
 def _pdf(data):
@@ -160,8 +321,8 @@ def add(name, data_b64, mime=""):
                       "error": "", "chars": 0, "truncated": False, "size": len(data), "t": time.time()}
     if len(data) > MAX_BYTES:
         files[fid].update(state="error", error="fichier trop gros (200 Mo max.)")
-    else:
-        threading.Thread(target=_extract, args=(fid, name, data, mime), daemon=True).start()
+    elif not start_reader(_extract, fid, name, data, mime):
+        files[fid].update(state="error", error=READERS_BUSY)
     return status(fid)
 
 

@@ -30,6 +30,22 @@ def test_page_is_served(base):
     assert code == 200 and b"<title>" in html and b"Sparky" in html
 
 
+def test_reviewed_summary_permits_a_fork_but_no_changes_to_its_transcript(base):
+    import harness
+    import server
+    draft = harness.Session()
+    draft.meta["workflow_run"] = "test-review"
+    draft.turns = [(0, 0)]
+    draft.history = [{"role": "user", "text": "input", "raw": "input"}, {"role": "assistant", "text": "summary"}]
+    draft.events = [{"type": "user", "text": "input"}, {"type": "reply", "text": "summary"}, {"type": "done"}]
+    draft.save()
+    server.sessions[draft.id] = draft
+    for route in ("/api/chat", "/api/redo", "/api/version/switch"):
+        assert call(base, route, {"id": draft.id, "text": "replace", "k": 0, "j": 0})[0] == 409
+    fork = draft.fork(0)
+    assert not fork.meta.get("workflow_run") and fork.events[1]["text"] == "summary"
+
+
 def test_settings_and_catalog(base):
     code, s = call(base, "/api/settings")
     assert code == 200 and {"catalog", "settings", "syscheck", "onboarded"} <= s.keys()

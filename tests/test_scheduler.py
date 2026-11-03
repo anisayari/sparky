@@ -112,3 +112,85 @@ def test_run_now(sched):
     assert not sched.run_now("missing", wait=True, runner=lambda p, title: "s")
     assert sched.run_now(t["id"], wait=True, runner=lambda p, title: "s2")
     assert sched.get(t["id"])["last_session"] == "s2"
+
+
+def test_schedule_permissions_and_model_errors(sched, monkeypatch):
+    import server
+    import harness
+    options = {"prompt": "Offline test", "when": {"type": "interval", "minutes": 5}, "model": "local-mock"}
+    selected = sched.save_task(options)
+    assert selected["web"] is False and selected["model"] == "local-mock"
+    monkeypatch.setattr(sched, "_runner", server.run_scheduled)
+    monkeypatch.setitem(server.llm_state, "name", "other")
+    sched.run_now(selected["id"], wait=True)
+    assert "modèle" in sched.get(selected["id"])["last_error"]
+    monkeypatch.setitem(server.llm_state, "name", "local-mock")
+    monkeypatch.setitem(harness.SETTINGS, "llm", "local-mock")
+
+    def broken_turn(session, prompt, uploads, mask, mask_for, emit):
+        assert not session.web_on()
+        assert harness.required_model.get() == "local-mock"
+        emit({"type": "error", "text": "model unavailable"})
+        return "failed"
+    monkeypatch.setattr(harness.Session, "turn", broken_turn)
+    sched.run_now(selected["id"], wait=True)
+    result = sched.get(selected["id"])
+    assert result["last_error"] == "model unavailable" and not result["unread"] and not result["last_session"]
+    assert harness.required_model.get() is None
+
+
+def test_document_sequence_survives_restart_and_only_reviews_its_own_result(sched, monkeypatch):
+    import harness
+    import rag
+    import workflows
+    task = sched.save_task({"prompt": "Choose a colour", "collection": 9, "title": "Colour",
+                            "when": {"type": "once", "at": ts(2026, 10, 14, 8, 0)}}, ts(2026, 10, 14, 7, 0))
+    calls = []
+    hit = {"chunk_id": 1, "doc_id": 1, "revision": "sample", "collection_id": 9,
+           "text": "Amber is orange.", "doc": "note", "page": 1, "source_number": 1}
+    monkeypatch.setitem(harness.SETTINGS, "llm", "local-mock")
+    monkeypatch.setattr(rag, "search", lambda prompt, ids: calls.append("search") or [hit])
+    monkeypatch.setattr(rag, "live_hits", lambda refs, ids: [hit] if ids == [9] else [])
+    monkeypatch.setattr(harness, "chat_once", lambda body: calls.append("summarize") or "Orange [1].")
+    original = workflows.summarize
+
+    def crash_after_commit(*args):
+        original(*args)
+        raise SystemExit("simulated restart after saving result")
+    monkeypatch.setattr(workflows, "summarize", crash_after_commit)
+    with pytest.raises(SystemExit):
+        sched.run_now(task["id"], wait=True, runner=lambda *_: None)
+    paused = sched.get(task["id"])
+    assert paused["run"]["phase"] == "summarize" and "Amber" not in str(paused["run"])
+    monkeypatch.setattr(workflows, "summarize", original)
+    assert sched.tick(ts(2026, 10, 14, 7, 30), runner=lambda *_: None) == [task["id"]]
+    ready = sched.get(task["id"])
+    assert ready["run"]["phase"] == "review" and ready["unread"] and not ready["last_error"]
+    saved = harness.Session.load(ready["last_session"])
+    assert any(e.get("text") == "Orange [1]." for e in saved.events)
+    assert not sched.run_now(task["id"], wait=True, runner=lambda *_: None)
+    assert not sched.review_result(task["id"], "obsolete", "approved")
+    saved.events.append({"type": "reply", "text": "Changed after review"})
+    saved.save()
+    assert not sched.review_result(task["id"], ready["run"]["id"], "approved")
+    saved.events.pop()
+    saved.save()
+    assert sched.review_result(task["id"], ready["run"]["id"], "approved")
+    assert not sched.review_result(task["id"], ready["run"]["id"], "approved")
+    assert calls == ["search", "summarize"]
+
+
+def test_cancel_a_running_sequence_does_not_create_a_result_or_disable_other_runs(sched, monkeypatch):
+    import workflows
+    task = sched.save_task({"prompt": "summary", "collection": 4, "when": {"type": "interval", "minutes": 60}})
+    def pause(task, run, checkpoint):
+        checkpoint("summarize", sources=[], model="local")
+        assert not sched.cancel_workflow(task["id"], "a previous run")
+        assert sched.cancel_workflow(task["id"], run["id"])
+        checkpoint("summarize", sources=[], model="local")
+        pytest.fail("cancelled step continued")
+    monkeypatch.setattr(workflows, "summarize", pause)
+    sched.run_now(task["id"], wait=True, runner=lambda *_: None)
+    current = sched.get(task["id"])
+    assert current["enabled"] and current["next_run"]
+    assert current["run"]["phase"] == "cancelled" and not current["last_session"]

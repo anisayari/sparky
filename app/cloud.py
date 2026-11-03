@@ -6,9 +6,10 @@ the other providers speak the OpenAI chat-completions format.
 
 Everything Sparky sends to the assistant (messages, images, attached files) then goes to the provider.
 """
-import json, os, re, threading, urllib.error, urllib.request
+import contextlib, json, os, re, threading, urllib.error, urllib.request
 
 import config
+import turn_runtime
 
 FILE = os.path.join(config.DATA, "cloud.json")
 PROVIDERS = {   # id -> label, OpenAI-compatible base URL, where to get a key
@@ -138,7 +139,7 @@ VISION_HINT = re.compile(r"gpt-4o|gpt-4\.1|gpt-5|o3|o4|gemini|claude|pixtral|vis
 REASONING_HINT = re.compile(r"^(o\d|gpt-5)|reason|r1|thinking|grok-4|magistral", re.I)
 
 
-def _oai_stream(pid, model, messages, max_tokens, think, json_mode):
+def _oai_stream(pid, model, messages, max_tokens, think, json_mode, admission):
     body = {"model": model, "messages": messages, "stream": True}
     body["max_completion_tokens" if pid == "openai" else "max_tokens"] = max_tokens
     extra = {}
@@ -154,7 +155,8 @@ def _oai_stream(pid, model, messages, max_tokens, think, json_mode):
     for attempt in ((body | extra, body) if extra else (body,)):  # a 400 on an optional parameter: retry bare
         req = urllib.request.Request(base_url(pid) + "/chat/completions", json.dumps(attempt).encode(), _headers(pid))
         try:
-            r = urllib.request.urlopen(req, timeout=900)
+            with admission():
+                r = urllib.request.urlopen(req, timeout=900)
         except urllib.error.HTTPError as e:
             text = e.read().decode(errors="replace")
             if e.code in (400, 422) and attempt is not body:
@@ -162,7 +164,7 @@ def _oai_stream(pid, model, messages, max_tokens, think, json_mode):
             raise RuntimeError(_friendly(pid, e.code, text)) from None
         except urllib.error.URLError as e:
             raise RuntimeError(f"connexion impossible à {PROVIDERS[pid]['label']} ({e.reason})") from None
-        with r:
+        with r, turn_runtime.response(r):
             for raw in r:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:") or line == "data: [DONE]":
@@ -252,7 +254,7 @@ def _to_claude(messages):
     return "\n\n".join(system), out
 
 
-def _claude_stream(meta, messages, max_tokens, think):
+def _claude_stream(meta, messages, max_tokens, think, admission):
     import anthropic
     system, msgs = _to_claude(messages)
     model = meta["model"]
@@ -268,9 +270,14 @@ def _claude_stream(meta, messages, max_tokens, think):
         opt["extra_headers"] = {"anthropic-beta": "server-side-fallback-2026-07-01"}
         opt["extra_body"] = {"fallbacks": "default"}
     client = _client()
+    if admission is not contextlib.nullcontext:
+        client = client.with_options(max_retries=0)
     for attempt in ((kw | opt, kw) if opt else (kw,)):
         try:
-            with client.messages.stream(**attempt) as s:
+            with contextlib.ExitStack() as stack:
+                with admission():
+                    s = stack.enter_context(client.messages.stream(**attempt))
+                stack.enter_context(turn_runtime.response(s))
                 for ev in s:
                     if ev.type == "content_block_delta":
                         if ev.delta.type == "text_delta":
@@ -300,12 +307,21 @@ def models(pid):
     return _claude_models() if pid == "anthropic" else _oai_models(pid)
 
 
-def stream(meta, messages, max_tokens=8000, think="off", json_mode=False):
+def stream(meta, messages, max_tokens=8000, think="off", json_mode=False, admission=contextlib.nullcontext):
     """Yields (text, reasoning) pieces. meta: the catalog entry of a cloud model."""
+    import rag
+    documents = rag.admission.get()
+    if documents is not contextlib.nullcontext:
+        previous = admission
+
+        @contextlib.contextmanager
+        def admission():
+            with previous(), documents():
+                yield
     if meta["provider"] == "anthropic":
-        yield from _claude_stream(meta, messages, max_tokens, think)
+        yield from _claude_stream(meta, messages, max_tokens, think, admission)
     else:
-        yield from _oai_stream(meta["provider"], meta["model"], messages, max_tokens, think, json_mode)
+        yield from _oai_stream(meta["provider"], meta["model"], messages, max_tokens, think, json_mode, admission)
 
 
 def complete(meta, messages, max_tokens=900, json_mode=False):
