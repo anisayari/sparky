@@ -4,6 +4,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,6 +84,42 @@ def test_cloud_retry_rechecks_and_does_not_retry_revoked_data(source, monkeypatc
     with pytest.raises(ValueError, match="sources ont changé"):
         s.ask_llm()
     assert len(sent) == 1 and "provenance-sentinel" in str(sent) and "_sources" not in str(sent)
+
+
+def test_threaded_claude_turn_checks_selection_before_sdk_request(source, monkeypatch):
+    pytest.importorskip("anthropic")
+    s, _ = source
+    sent, options, events = [], [], []
+    sdk = SimpleNamespace(messages=SimpleNamespace(stream=lambda **kw: sent.append(kw)))
+    sdk.with_options = lambda **kw: options.append(kw) or sdk
+    monkeypatch.setattr(cloud, "_client", lambda: sdk)
+    monkeypatch.setattr(harness, "cloud_model", lambda: {"provider": "anthropic", "model": "fixture"})
+    fit = turn_runtime.fit
+    def revoke(*args):
+        result = fit(*args)
+        s.config["docs"] = []
+        return result
+    monkeypatch.setattr(turn_runtime, "fit", revoke)
+    assert s.turn("another question", [], None, None, events.append) == "failed"
+    assert not sent and options == [{"max_retries": 0}]
+    assert any("sources ont changé" in e.get("text", "") for e in events)
+
+
+def test_revoked_document_in_discarded_history_does_not_block(source, monkeypatch):
+    s, hit = source
+    s.history.append({"role": "user", "raw": "hello", "text": "hello", "images": []})
+    route(monkeypatch, "local")
+    def drop_old(messages, *args):
+        assert "provenance-sentinel" in str(messages[1])
+        rag.delete_document(hit["doc_id"])
+        return [messages[0], messages[-1]], 200
+    monkeypatch.setattr(turn_runtime, "fit", drop_old)
+    def open_request(req, **kw):
+        assert "provenance-sentinel" not in str(req.data) and "_sources" not in str(req.data)
+        reply = json.dumps({"action": "reply", "args": {"text": "OK"}})
+        return io.BytesIO(("data: " + json.dumps({"choices": [{"delta": {"content": reply}}]}) + "\n").encode())
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
+    assert s.ask_llm()["args"]["text"] == "OK"
 
 
 def test_after_open_revocation_does_not_wait_for_stream(source, monkeypatch):
