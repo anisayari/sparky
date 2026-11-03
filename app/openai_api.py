@@ -128,10 +128,9 @@ def chat(handler):
     if not isinstance(b.get("messages"), list) or not b["messages"]:
         return _error(handler, 400, "'messages' is required")
     mid, stream = m[0], bool(b.get("stream"))
-    with harness.busy("llm"):
-        if harness.cloud_model():
-            return _cloud(handler, b, mid, stream)
-        return _local(handler, b, mid, stream)
+    if harness.cloud_model():
+        return _cloud(handler, b, mid, stream)
+    return _local(handler, b, mid, stream)
 
 
 def _local(handler, b, mid, stream):
@@ -149,7 +148,28 @@ def _local(handler, b, mid, stream):
     try:
         import process_owner
         process_owner.require_endpoint(req.full_url)
-        r = urllib.request.urlopen(req, timeout=900)
+        with harness.busy("llm"), urllib.request.urlopen(req, timeout=900) as r:
+            if not stream:
+                out = json.load(r)
+                out["model"] = mid
+            else:
+                _sse_open(handler)
+                try:
+                    for raw in r:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            chunk["model"] = mid
+                        except ValueError:
+                            continue
+                        _sse(handler, chunk)
+                except OSError:
+                    return
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
@@ -158,29 +178,12 @@ def _local(handler, b, mid, stream):
             return _error(handler, e.code, raw.decode(errors="replace")[:600], "server_error")
     except OSError as e:
         return _error(handler, 503, f"local model unreachable: {e}", "server_error")
-    with r:
-        if not stream:
-            out = json.load(r)
-            out["model"] = mid
-            return _json(handler, 200, out)
-        _sse_open(handler)
-        try:
-            for raw in r:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    chunk["model"] = mid
-                except ValueError:
-                    continue
-                _sse(handler, chunk)
-            _sse(handler, "[DONE]")
-        except OSError:
-            pass  # the client went away
+    if not stream:
+        return _json(handler, 200, out)
+    try:
+        _sse(handler, "[DONE]")
+    except OSError:
+        pass
 
 
 def _cloud(handler, b, mid, stream):
@@ -192,8 +195,9 @@ def _cloud(handler, b, mid, stream):
     if not stream:
         try:
             text, reasoning = "", ""
-            for t, rs in harness.chat_deltas(body):
-                text, reasoning = text + t, reasoning + rs
+            with harness.busy("llm"):
+                for t, rs in harness.chat_deltas(body):
+                    text, reasoning = text + t, reasoning + rs
         except Exception as e:
             return _error(handler, 502, f"cloud model error: {e}", "server_error")
         msg = {"role": "assistant", "content": text} | ({"reasoning_content": reasoning} if reasoning else {})
@@ -208,11 +212,12 @@ def _cloud(handler, b, mid, stream):
     try:
         _sse(handler, chunk({"role": "assistant", "content": ""}))
         try:
-            for t, rs in harness.chat_deltas(body):
-                if rs:
-                    _sse(handler, chunk({"reasoning_content": rs}))
-                if t:
-                    _sse(handler, chunk({"content": t}))
+            with harness.busy("llm"):
+                for t, rs in harness.chat_deltas(body):
+                    if rs:
+                        _sse(handler, chunk({"reasoning_content": rs}))
+                    if t:
+                        _sse(handler, chunk({"content": t}))
             _sse(handler, chunk({}, "stop"))
         except Exception as e:  # headers are sent: report the error in the stream
             _sse(handler, {"error": {"message": f"cloud model error: {e}", "type": "server_error"}})

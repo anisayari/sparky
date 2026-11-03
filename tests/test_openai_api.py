@@ -172,8 +172,18 @@ def test_cloud_error_in_stream(api, monkeypatch):
     assert "quota" in sse(raw)[-1]["error"]["message"]
 
 
-def test_busy_counter_released(api):
+@pytest.mark.parametrize("remote", [False, True])
+def test_busy_counter_released(api, monkeypatch, remote):
     base, key, _ = api
-    import harness
+    import harness, openai_api
+    observed = []
+    publish = openai_api._json
+    def counted_response(*args):
+        observed.append(harness.ACTIVITY["llm"])
+        return publish(*args)
+    monkeypatch.setattr(openai_api, "_json", counted_response)
+    if remote:
+        monkeypatch.setattr(harness, "cloud_model", lambda: {"cloud": True})
+        monkeypatch.setattr(harness, "chat_deltas", lambda body: iter([("test", "")]))
     call(base + "/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}, key)
-    assert harness.ACTIVITY["llm"] == 0
+    assert observed == [0] and harness.ACTIVITY["llm"] == 0
