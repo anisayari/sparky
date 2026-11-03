@@ -5,7 +5,7 @@ The assistant model, image model and settings are chosen in the UI (Settings).
 Generated projects are served on the next port (preview origin): they cannot reach the API.
 """
 import argparse, base64, io, json, os, re, shutil, subprocess, sys, threading, time, urllib.request
-import http.server, socket, socketserver
+import http.server, secrets, socket, socketserver
 from urllib.parse import parse_qs, unquote, urlparse
 
 import psutil
@@ -22,6 +22,7 @@ import mcp
 import openai_api
 import process_owner
 import rag
+import rag_sync
 import scheduler
 import studio
 import syscheck
@@ -37,17 +38,20 @@ MAX_BODY = 300 * 2**20  # an attached file is at most 200 MB (base64 makes it a 
 NO_ASSISTANT = "Aucun assistant n'est installé : ouvre Paramètres > Bibliothèque de modèles."
 SID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")  # Session ids (they are folder names)
 sessions = {}           # id -> Session (in memory)
+_sessions_lock = threading.RLock()
 llm_state = {"name": None, "ctx": 0}  # ctx: context window of the running llama-server
 failed = set()          # models that just failed to load: not retried automatically (the user can retry)
 # model switch in progress, tracked by the UI (spinner + steps)
 switch = {"kind": None, "id": None, "label": "", "phase": "idle", "steps": [], "t0": 0.0, "eta": 0, "error": ""}
 _switch_lock = threading.Lock()
 _engines = process_owner.Engines()
+_instance_id = secrets.token_hex(32)
 
 
 # ---------------------------------------------------------------- engines (llama-server, ComfyUI)
 def alive(url):
     try:
+        process_owner.require_endpoint(url)
         with urllib.request.urlopen(url, timeout=2):
             return True
     except Exception:
@@ -126,6 +130,7 @@ def launch_llm(m):
     args = catalog.llm_args(m)
     gpu = syscheck.current()["assess"]["mode"] != "cpu"
     ctx = llm_state["ctx"] = llm_ctx(m)
+    harness.ACTIVE_CONTEXT = ctx
     started = _spawn("llm", [config.LLAMA_SERVER, "-m", args[0], "--port", str(config.LLM_PORT), "-ngl", "99" if gpu else "0",
                              "-c", str(ctx), "--jinja", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", *args[1:]], LLM_LOG)
     if not started:
@@ -269,12 +274,13 @@ def use_model(mid, auto=False):
 def get_session(sid):
     """Session in memory or on disk; None for an unknown or malformed id (ids become folder names)."""
     sid = str(sid or "")
-    if sid in sessions:
+    with _sessions_lock:
+        if sid in sessions:
+            return sessions[sid]
+        if not SID.fullmatch(sid) or not os.path.exists(os.path.join(harness.DATA, sid, "session.json")):
+            return None
+        sessions[sid] = harness.Session.load(sid)
         return sessions[sid]
-    if not SID.fullmatch(sid) or not os.path.exists(os.path.join(harness.DATA, sid, "session.json")):
-        return None
-    sessions[sid] = harness.Session.load(sid)
-    return sessions[sid]
 
 
 _ckpts = {"t": 0.0, "v": []}
@@ -359,21 +365,38 @@ def apply_config(s, new):
         s.config["system"] = new["system"][:8000]
     if "docs" in new:
         s.config["docs"] = [int(x) for x in new["docs"] or []]
+    if "excluded_docs" in new:
+        s.config["excluded_docs"] = [int(x) for x in new["excluded_docs"] or []]
+    if "web_blocked" in new:
+        s.config["web_blocked"] = new["web_blocked"] is True
     if "web" in new:
         s.config["web"] = bool(new["web"])
-    import computer
-    if new.get("computer") in computer.LEVELS and new["computer"] != s.config.get("computer"):
-        s.config["computer"] = new["computer"]
-        s.config["computer_allow"] = []  # "always allow" choices do not survive a change of level
+    if "computer" in new:
+        s.set_computer_level(new["computer"])
 
 
-def run_scheduled(prompt, title):
+def run_scheduled(prompt, title, options=None):
     """Scheduled task: runs the prompt in a new conversation, returns its id."""
+    options = options or {}
+    model = options.get("model") or llm_state["name"]
+    if not model or model != llm_state["name"]:
+        raise ValueError("Le modèle prévu pour cette tâche doit être actif.")
     s = harness.Session()
     s.meta["title"] = "⏰ " + title
     sessions[s.id] = s
-    s.config["web"] = True  # tasks like "summarize today's news" need the web
-    s.turn(prompt, [], None, None, lambda e: None)
+    s.config["web"] = options.get("web", True)  # preserve the behavior of schedules created before 1.7
+    error = None
+    def record(event):
+        nonlocal error
+        if event.get("type") == "error":
+            error = event.get("text")
+    binding = harness.required_model.set(model)
+    try:
+        status = s.turn(prompt, [], None, None, record)
+    finally:
+        harness.required_model.reset(binding)
+    if status != "completed" or error:
+        raise RuntimeError(error or f"Tâche inachevée ({status}).")
     return s.id
 
 
@@ -683,18 +706,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 imgs[i] = base64.b64encode(open(v["path"], "rb").read()).decode()
             except OSError:
                 pass
-        st = {k: getattr(s, k) for k in ("history", "events", "n", "lang", "artifacts", "projects", "config", "meta", "turns")}
-        # A portable transcript does not grant the recipient access to cached local document excerpts.
+        private_copy = q.get("fmt") == "backup"
+        st = {k: getattr(s, k) for k in ("n", "lang", "artifacts", "projects", "meta", "turns")}
         st["history"] = []
+        # Keep one event per original event: turn boundaries are indexes into this list.
+        st["events"] = (s.events if private_copy else
+                        [event | {"items": []} if event.get("type") == "sources" and event.get("kind") == "docs"
+                         else event for event in s.events])
         for message in s.history:
             portable = {k: v for k, v in message.items() if k != "rag_hits"}
             if message["role"] == "user":
                 portable["text"] = s._scoped_history_text(message, set())
+                if private_copy and message.get("rag_hits"):
+                    portable["rag_hits"] = rag.live_hits(message["rag_hits"], s.doc_ids())
             st["history"].append(portable)
-        st |= {"format": "sparky-chat", "version": 1, "title": title,
+        st |= {"format": "sparky-chat", "version": 1, "purpose": "local-backup" if private_copy else "share", "title": title,
                "images": {i: {k: v for k, v in s.images[i].items() if k != "path"} | {"png": b} for i, b in imgs.items()}}
         self.send(200, json.dumps(st, ensure_ascii=False).encode(), "application/json",
-                  [("Content-Disposition", f'attachment; filename="{name}.json"')])
+                  [("Content-Disposition", f'attachment; filename="{name}{"-local" if private_copy else ""}.json"')])
 
     def workspace_get(self, path):
         d = workspace.get()
@@ -702,6 +731,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "api": openai_api.settings() | {"url": f"http://127.0.0.1:{config.APP_PORT}/v1",
                                                              "model": llm_state["name"]},
                             "schedules": scheduler.list_(), "unread": scheduler.unread(),
+                            "task_models": [{"id": mid, "label": LLMS[mid]["label"]} for mid in installed_llms()],
                             "settings": {k: harness.SETTINGS.get(k) for k in ("custom", "searx", "mcp_on")}})
 
     def studio_lib(self, path):
@@ -844,9 +874,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit({"type": "done"})
             return
         if b.get("mode") == "continue":
-            return s.turn("", [], None, None, emit, kind="continue")
+            return s.turn("", [], None, None, emit, kind="continue", turn_id=b.get("turnId"))
         k = int(b.get("k", len(s.turns) - 1))
-        s.turn(b.get("text") if b.get("mode") == "edit" else None, [], None, None, emit, rewind=k)
+        s.turn(b.get("text") if b.get("mode") == "edit" else None, [], None, None, emit, rewind=k, turn_id=b.get("turnId"))
+
+    def cancel_turn(self, path):
+        b = self.body()
+        session = get_session(b.get("id"))
+        ok = bool(session and session.cancel_turn(b.get("turnId")))
+        self.send(200 if ok else 409, {"ok": ok, "error": None if ok else "Ce tour est déjà terminé ou en attente."})
+
+    def fork_chat(self, path):
+        b = self.body()
+        session = get_session(b.get("id"))
+        if not session:
+            return self.send(404, {"error": "Conversation inconnue."})
+        if not session.lock.acquire(blocking=False):
+            return self.send(409, {"error": "Conversation en cours."})
+        try:
+            branch = session.fork(b.get("k"), after_reply=b.get("side") != "user")
+        except (ValueError, OSError) as exc:
+            return self.send(400, {"error": str(exc)})
+        finally:
+            session.lock.release()
+        sessions[branch.id] = branch
+        self.send(200, {"id": branch.id})
 
     def workspace_save(self, path):
         """Assistants, prompts, knowledge, MCP servers, API, scheduled tasks: {what, action, ...}."""
@@ -859,6 +911,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send(200, {"ok": True})
                 return self.send(200, {"id": workspace.save(what, b.get("item") or {})})
             if what == "collection":
+                if act == "folder":
+                    rag_sync.set_folder(int(b["id"]), str(b.get("folder") or ""))
+                    return self.send(200, {"ok": True})
                 if act == "delete":
                     rag.delete_collection(int(b["id"]))
                 elif act == "rename":
@@ -894,7 +949,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if act == "delete":
                     scheduler.delete(b.get("id"))
                 elif act == "run":
-                    scheduler.run_now(b.get("id"))
+                    if not scheduler.run_now(b.get("id")):
+                        return self.send(409, {"error": "Tâche indisponible ou en attente de validation."})
+                elif act == "review":
+                    if not scheduler.review_result(b.get("id"), b.get("run"), b.get("decision")):
+                        return self.send(409, {"error": "Ce résultat n’est plus en attente de validation."})
                 elif act == "read":
                     scheduler.mark_read(b.get("id"))
                 else:
@@ -931,10 +990,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if act == "delete":
                 return self.send(200, {"ok": studio.delete(b.get("id"))})
             if act == "cancel":
-                j = next((j for j in studio.jobs if j["id"] == b.get("id") and j["state"] == "queued"), None)
-                if j:
-                    j.update(state="error", error="annulé", ended=time.time())
-                return self.send(200, {"ok": bool(j)})
+                return self.send(200, {"ok": studio.cancel(b.get("id"))})
         except ValueError as e:
             return self.send(400, {"error": str(e)})
         self.send(404, {"error": "introuvable"})
@@ -953,17 +1009,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def new_session(self, path):
         s = harness.Session(ephemeral=bool(self.body().get("ephemeral")))
         # a previous ephemeral conversation disappears as soon as another one is opened
-        for k in [k for k, v in sessions.items() if v.ephemeral]:
-            sessions.pop(k).delete()
-        sessions[s.id] = s
+        with _sessions_lock:
+            for k, v in list(sessions.items()):
+                if v.ephemeral and v.delete():
+                    sessions.pop(k, None)
+            sessions[s.id] = s
         self.send(200, {"id": s.id, "ephemeral": s.ephemeral})
 
     def delete_session(self, path):
         sid = self.body().get("id")
-        s = get_session(sid)
-        sessions.pop(sid, None)
-        if s:
-            s.delete()
+        with _sessions_lock:
+            s = get_session(sid)
+            if s and not s.delete():
+                return self.send(409, {"error": "Conversation en cours. Arrête la génération avant de la supprimer."})
+            sessions.pop(sid, None)
         self.send(200, {"ok": True})
 
     def install(self, path):
@@ -1094,7 +1153,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         uploads = [decode_image(u).convert("RGB") for u in b.get("images", [])]
         mask = decode_image(b["mask"]).convert("RGB") if b.get("mask") else None
-        s.turn(b.get("text", ""), uploads, mask, b.get("maskFor"), emit, files=attach.take(b.get("files")))
+        s.turn(b.get("text", ""), uploads, mask, b.get("maskFor"), emit, files=attach.take(b.get("files")),
+               turn_id=b.get("turnId"))
 
     def bot(self, path):
         """Sparky Bot: companion with long-term memory (see companion.py)."""
@@ -1136,6 +1196,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 _json = lambda f: lambda h, p: h.send(200, f())  # noqa: E731  routes that only return data
 GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo, "/api/health": Handler.health,
+       "/api/instance": _json(lambda: {"instance": _instance_id}),
        "/api/metrics": _json(metrics), "/api/sessions": _json(harness.Session.list_all), "/api/state": Handler.state,
        "/api/projzip": Handler.projzip, "/api/settings": Handler.settings, "/api/syscheck": _json(syscheck.current),
        "/api/bot": Handler.bot_state, "/api/voice": Handler.voice, "/api/localscan": _json(localscan.status),
@@ -1146,6 +1207,7 @@ GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo
        "/api/studio": Handler.studio_lib}
 GET_PREFIX = [("/api/img/", Handler.image), ("/vendor/", Handler.vendor), ("/api/studio/file/", Handler.studio_file)]
 POST = {"/api/new": Handler.new_session, "/api/delete": Handler.delete_session, "/api/install": Handler.install,
+        "/api/turn/cancel": Handler.cancel_turn, "/api/fork": Handler.fork_chat,
         "/api/syscheck": Handler.rescan, "/api/projrun": Handler.projrun, "/api/onboarded": Handler.onboarded,
         "/api/use": Handler.use, "/api/restart": Handler.restart,"/api/attach": Handler.attach_add, "/api/cloud/key": Handler.cloud_key,
         "/api/cloud/remove": Handler.cloud_remove, "/api/cloud/add": Handler.cloud_add,
@@ -1215,7 +1277,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def first_assistant():
     """Loads an assistant at startup (through the switch, so the UI shows the loading steps)."""
-    if alive(harness.LLM + "/health"):  # llama-server still running from a previous session
+    if config.EXTERNAL_LLM and alive(harness.LLM + "/health"):
         llm_state["name"] = harness.SETTINGS["llm"]
         return
     ok, rec = installed_llms(), syscheck.current().get("recommended", {}).get("llm")
@@ -1242,6 +1304,8 @@ def main():
 
 
 def _serve(a, ui, preview, stop_requested):
+    process_owner.manage_requests(_engines)
+    config.write_json(os.path.join(config.ROOT, "data", "instance.json"), {"instance": _instance_id})
     harness.load_settings()
     # Older builds kept the last raw model output, even for ephemeral chats.
     try:
@@ -1265,6 +1329,7 @@ def _serve(a, ui, preview, stop_requested):
         threading.Thread(target=autostart, daemon=True).start()
     updater.start()
     attach.server_voice = voice_model
+    rag_sync.start(stop_requested)
     openai_api.active_model = lambda: (llm_state["name"], LLMS[llm_state["name"]]["label"]) if llm_state["name"] in LLMS else None
     threading.Thread(target=mcp.start_all, daemon=True).start()
     scheduler.start(run_scheduled)

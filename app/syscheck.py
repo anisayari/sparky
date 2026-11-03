@@ -172,7 +172,7 @@ if __name__ == "__main__":
     if "--json" in sys.argv:  # for install.ps1: display-ready summary, in the requested language
         import catalog
         fr = "--lang=fr" in sys.argv
-        rec = {k: {"label": catalog.BY_ID[v]["label"], "size_gb": catalog.BY_ID[v]["size_gb"]}
+        rec = {k: {"id": v, "label": catalog.BY_ID[v]["label"], "size_gb": catalog.BY_ID[v]["size_gb"]}
                for k, v in info["recommended"].items() if v}
         print(json.dumps({"hw": info["hw"], "assess": info["assess"] | {"tier_label": info["assess"]["tier_label"] if fr else TIER_EN.get(info["assess"]["tier_label"])},
                           "recommended": rec, "notes": info["notes"] if fr else [note_en(n) for n in info["notes"]]}))

@@ -28,6 +28,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 ### 💬 Chat
 - 🔒 **Local chat history** — temporary chats keep their own transient files and support text and vision. Use a regular chat for image generation or editing, because the shared ComfyUI engine retains inputs and outputs.
 - ✏️ **Edit** any message, 🔁 **regenerate** or ➡️ **continue** an answer, and flip between versions (‹ 2/3 ›).
+- Open a separate conversation from a message to try another approach. Generated files follow the selected version. Use **Stop** to interrupt a running turn.
 - 🧠 **Adjustable thinking** — Off, Light, Normal or Deep, and see how the model reasoned.
 - 📝 **Rich answers** — tables, LaTeX formulas, Mermaid diagrams, task lists, syntax-highlighted code (all offline).
 - 👁️ **Vision** — drop photos, screenshots or scans: the assistant sees and analyses them.
@@ -36,6 +37,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 
 ### 📚 Knowledge & web
 - 📄 **Ask your documents (RAG)** — collections of PDFs, Office files, text, code… indexed on your PC, answers **with numbered sources** [1] [2].
+- Link a local folder in **Workspace > Documents** to index additions, edits and removals. When upgrading an existing library, reselect the collections for each assistant or conversation that needs them. The library retains the documents.
 - 🌐 **Web search, when you want it** — turn on *Web*: the assistant searches (DuckDuckGo or your SearXNG), reads pages and the links you paste, and cites them. Off by default.
 - 🧑‍💼 **Assistants** — a role, its documents and web access, reusable in one click.
 - ⚡ **Prompt library** — type **/** to insert a saved prompt with `{{variables}}`; standing instructions for every chat or just one.
@@ -54,6 +56,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 💻 **Computer mode** — Sparky can look at and act on your PC: browse folders and the desktop, read and search files (PDF and Office too), take a screenshot, write, copy, move, send to the Recycle Bin, open files and apps, run PowerShell commands. **You choose the security level** for each chat: *Off*, *Read only*, *Read freely & ask before changes* (recommended), *Ask for everything* or *Full access*; actions that need your OK show an **approval card** (Allow / Always in this chat / Deny).
 - 🔌 **MCP tools** — plug any Model Context Protocol server (same config as Claude Desktop: files, GitHub, databases…).
 - ⏰ **Scheduled tasks** — "every morning at 8, summarize the tech news": the answer lands in a new chat.
+- In **Workspace > Tasks**, select a model and enable Web for tasks that need it. Choosing a collection runs a read-only document search and cited summary. Review the resulting conversation and approve or reject the summary before the next run. A pinned model must be active when its task runs.
 - 🔗 **OpenAI-compatible API** — use Sparky's model from Continue, VS Code extensions or scripts at `http://127.0.0.1:7860/v1`. Off by default.
 - 🤖 **Sparky Bot (beta)** — a companion that remembers you and learns your style, with a memory you can see and edit ([details](#-sparky-bot--personal-companion-with-memory-beta-in-progress)).
 
@@ -152,6 +155,8 @@ irm https://raw.githubusercontent.com/anisayari/sparky/main/install.ps1 | iex
 ```
 
 **Or** download the project (*Code > Download ZIP*), unzip it and double-click `install.bat`.
+
+For a smaller chat installation, run `.\install.ps1 -ChatOnly` from the downloaded project. Run the installer again with the full profile to add Studio later.
 
 The installer walks you through 7 simple steps:
 
@@ -268,6 +273,10 @@ Everything runs on your machine: conversations, documents, images and models sta
 The management API verifies that the local client belongs to the same OS account and checks the browser origin. Web previews use a separate port. The optional OpenAI-compatible API (`/v1`) requires its bearer key and listens on `127.0.0.1`. Public web requests connect to a validated public IP at each redirect.
 
 After upgrading from 1.6.1 or earlier, select the assistant, document collections, web access and Computer permissions again for existing conversations. Older session files do not record whether these settings were chosen locally or imported from someone else's file.
+
+**Local-only companion** in the companion settings requires an active local model for that companion. With a cloud model and cloud access enabled for the companion, its exchanges and enabled memory context can go to the displayed provider. The JSON sharing export removes internal document-source previews. Text already quoted in visible messages remains part of the transcript.
+
+Sparky normally connects to engines started by its installation. To deliberately reuse a separately managed llama.cpp or ComfyUI server on the configured loopback port, set `allow_external_llm` or `allow_external_comfy` to `true` in your configuration.
 
 ## 💻 Computer mode and security
 

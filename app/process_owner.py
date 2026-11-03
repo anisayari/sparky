@@ -127,6 +127,26 @@ class Engines:
         self.children = {}
         self.closed = False
 
+    def owns_listener(self, role, port):
+        # Inspect only our still-live launcher and its descendants. Never signal a port owner.
+        import psutil
+        with self.lock:
+            child = self.children.get(role)
+            if child is None or not child.running():
+                return False
+            try:
+                launcher = psutil.Process(child.process.pid)
+                for proc in [launcher, *launcher.children(recursive=True)]:
+                    try:
+                        connections = getattr(proc, "net_connections", None) or proc.connections
+                        if any(c.status == psutil.CONN_LISTEN and c.laddr.port == port for c in connections(kind="tcp")):
+                            return child.running()
+                    except (psutil.AccessDenied, psutil.NoSuchProcess):
+                        continue
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+            return False
+
     def spawn(self, role, cmd, log, cwd=None):
         with self.lock:
             if self.closed:
@@ -151,6 +171,23 @@ class Engines:
                 self.stop("llm")
             finally:
                 self.stop("comfy")
+
+
+_managed = None
+
+
+def manage_requests(engines):
+    global _managed
+    _managed = engines
+
+
+def require_endpoint(url):
+    if _managed is None:
+        return
+    import config
+    for role, port, external in (("llm", config.LLM_PORT, config.EXTERNAL_LLM), ("comfy", config.COMFY_PORT, config.EXTERNAL_COMFY)):
+        if url.startswith(f"http://127.0.0.1:{port}/") and not external and not _managed.owns_listener(role, port):
+            raise ConnectionError(f"Port {port} : aucun moteur {role} de cette installation n'est prêt.")
 
 
 if __name__ == "__main__" and os.name == "nt" and sys.argv[1:2] == ["--in-job"]:

@@ -38,6 +38,7 @@ def profile():
     p.setdefault("persona", "warm")
     p.setdefault("custom", "")
     p["memory_on"] = p.get("memory_on", True) is True
+    p["local_only"] = p.get("local_only", False) is True
     return p
 
 
@@ -45,26 +46,28 @@ def update_profile(changes):
     global _memory_epoch
     with _memory_lock:
         p = profile()
-        if "memory_on" in changes and type(changes["memory_on"]) is not bool:
-            raise ValueError("memory_on must be true or false")
+        for key in ("memory_on", "local_only"):
+            if key in changes and type(changes[key]) is not bool:
+                raise ValueError(f"{key} must be true or false")
         if changes.get("memory_on", p["memory_on"]) != p["memory_on"]:
             if changes["memory_on"]:
                 recent = S.messages(1)
                 p["memory_after"] = recent[-1]["id"] if recent else 0
             _memory_epoch += 1
-        p.update({k: changes[k] for k in ("name", "persona", "custom", "memory_on") if k in changes})
+        if changes.get("local_only", p["local_only"]) != p["local_only"]:
+            _memory_epoch += 1
+        p.update({k: changes[k] for k in ("name", "persona", "custom", "memory_on", "local_only") if k in changes})
         S.set("profile", p)
 
 
 def forget_all():
     global _memory_epoch, _last_forget_epoch
     with _memory_lock:
-        enabled = profile()["memory_on"]
+        p = profile()
         _memory_epoch += 1
         _last_forget_epoch = _memory_epoch
         S.forget_all()
-        if not enabled:
-            S.set("profile", {"memory_on": False})
+        S.set("profile", {k: p[k] for k in ("memory_on", "local_only")})
         state["last_ops"] = None
 
 
@@ -98,6 +101,19 @@ def _dispatch(epoch, messages, **options):
     return llm(messages, epoch=epoch, **options)
 
 
+class ConsentChanged(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _admit_cloud(epoch):
+    with _memory_lock:
+        if epoch != _memory_epoch or profile()["local_only"]:
+            raise ConsentChanged
+        # The protected section ends as soon as the transport opens the response.
+        yield
+
+
 def llm(messages, json_mode=False, max_tokens=900, temperature=0.7, stream=None, epoch=None):
     body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature,
             "chat_template_kwargs": {"enable_thinking": False}}
@@ -107,13 +123,26 @@ def llm(messages, json_mode=False, max_tokens=900, temperature=0.7, stream=None,
     with _memory_lock:
         if epoch is not None and epoch != _memory_epoch:
             return None
-        response = harness.chat_deltas(body)  # admission to the currently selected local or cloud transport
-    with harness.busy("llm"), contextlib.closing(response) as deltas:
-        for piece, _ in deltas:
-            out += piece
-            if stream and time.time() - last > 0.05:
-                last = time.time()
-                stream(re.sub(r"<think>.*?(</think>|$)", "", out, flags=re.S).lstrip())
+        epoch = _memory_epoch if epoch is None else epoch
+        model = harness.cloud_model()
+        if model and profile()["local_only"]:
+            raise ValueError("Compagnon local uniquement. Sélectionnez un modèle local.")
+    if model:
+        import cloud
+        response = cloud.stream(model, messages, max_tokens, json_mode=json_mode, admission=lambda: _admit_cloud(epoch))
+    else:
+        response = harness.llama_deltas(body)
+    try:
+        with harness.busy("llm"), contextlib.closing(response) as deltas:
+            for piece, _ in deltas:
+                if epoch != _memory_epoch:
+                    return None
+                out += piece
+                if stream and time.time() - last > 0.05:
+                    last = time.time()
+                    stream(re.sub(r"<think>.*?(</think>|$)", "", out, flags=re.S).lstrip())
+    except ConsentChanged:
+        return None
     out = re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip()
     if json_mode:
         m = re.search(r"\{.*\}", out, re.S)
@@ -174,6 +203,8 @@ def chat(text, emit):
         try:
             with _memory_lock:
                 epoch = _memory_epoch
+                if profile()["local_only"] and harness.cloud_model():
+                    raise ValueError("Compagnon local uniquement. Sélectionnez un modèle local.")
                 S.add_message("user", text)
                 sysp, mems = system_prompt(text)
             emit({"type": "context", "memories": mems})
@@ -307,7 +338,7 @@ def reflect(force=False):
     """Background consolidation. Runs after a pause in the conversation (or on demand)."""
     with _memory_lock:
         p = profile()
-        if not p["memory_on"] or state["reflecting"] or state["busy"]:
+        if not p["memory_on"] or state["reflecting"] or state["busy"] or (p["local_only"] and harness.cloud_model()):
             return False
         since = max(S.get("reflected_upto", 0), p.get("memory_after", 0))
         msgs = S.messages(80, after=since)
@@ -402,7 +433,9 @@ def idle_loop():
 
 def snapshot():
     p, b = profile(), bond()
+    model = harness.cloud_model() or {}
     return {"profile": p, "persona": PERSONAS.get(p["persona"], PERSONAS["warm"]), "personas": {k: v[0] for k, v in PERSONAS.items()},
+            "cloud_provider": model.get("providerLabel") or model.get("provider"),
             "bond": b, "style": S.get("style", {}), "mood": S.get("mood", ""), "memories": S.memories(),
             "journal": S.journal(), "summary": S.get("summary", ""), "checkin": S.get("checkin", ""),
             "messages": S.messages(60), "busy": state["busy"], "reflecting": state["reflecting"],

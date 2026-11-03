@@ -31,6 +31,8 @@ COMFY_IN = os.path.join(COMFY_DIR, "input")
 COMFY_OUT = os.path.join(COMFY_DIR, "output")
 COMFY_PORT = int(_cfg.get("comfy_port", 8188))
 LLM_PORT = int(_cfg.get("llm_port", 8080))
+EXTERNAL_LLM = _cfg.get("allow_external_llm") is True
+EXTERNAL_COMFY = _cfg.get("allow_external_comfy") is True
 APP_PORT = int(_cfg.get("app_port", 7860))
 PREVIEW_PORT = APP_PORT + 1  # generated projects are served on their own origin (they must not reach the API)
 NOWIN = 0x08000000 if os.name == "nt" else 0  # subprocess.CREATE_NO_WINDOW

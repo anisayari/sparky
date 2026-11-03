@@ -33,7 +33,7 @@ def test_foreground_context_revoked_before_provider_dispatch(bot, change):
 
 
 @pytest.fixture
-def bot(tmp_path, monkeypatch):
+def isolated_bot(tmp_path, monkeypatch):
     store = memory.Store(str(tmp_path / "companion.db"))
     # Load an independent companion backed only by this store. Keep the production
     # idle thread out of deterministic tests; exercise its reflect(force=False) entry directly.
@@ -53,11 +53,50 @@ def bot(tmp_path, monkeypatch):
         loader.setattr(threading.Thread, "start", start_unless_idle)
         spec.loader.exec_module(companion)
 
-    def unexpected_provider(*_args, **_kwargs):
-        pytest.fail("Unexpected provider call")
-    companion.llm = unexpected_provider
     yield companion
     store.db.close()
+
+
+@pytest.fixture
+def bot(isolated_bot, monkeypatch):
+    def unexpected_provider(*_args, **_kwargs):
+        pytest.fail("Unexpected provider call")
+    monkeypatch.setattr(isolated_bot, "llm", unexpected_provider)
+    return isolated_bot
+
+
+@pytest.mark.parametrize("provider", ["custom", "anthropic"])
+@pytest.mark.parametrize("transition", ["unchanged", "disable", "forget", "local_only"])
+def test_consent_at_transport_open(isolated_bot, clean_cloud, mock_provider, monkeypatch, provider, transition):
+    import mocks
+    bot = isolated_bot
+    if provider == "anthropic":
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", mock_provider.url)
+    clean_cloud.set_key(provider, mocks.KEY, mock_provider.url + "/oai" if provider == "custom" else None)
+    model = clean_cloud.entry(provider, "mock/model")
+    monkeypatch.setattr(bot.harness, "cloud_model", lambda: model)
+    original = clean_cloud.stream
+
+    def delayed(*args, **kwargs):
+        if transition == "disable":
+            bot.update_profile({"memory_on": False})
+        elif transition == "forget":
+            bot.forget_all()
+        elif transition == "local_only":
+            bot.update_profile({"local_only": True})
+        yield from original(*args, **kwargs)
+
+    monkeypatch.setattr(clean_cloud, "stream", delayed)
+    reply = bot.llm([{"role": "user", "content": "synthetic memory"}])
+    posts = [r for r in mock_provider.requests if r[0] == "POST"]
+    assert bool(reply) == (transition == "unchanged")
+    assert len(posts) == int(transition == "unchanged")
+    if transition == "local_only":
+        bot.forget_all()
+        assert bot.profile()["local_only"]
+        with pytest.raises(ValueError, match="local uniquement"):
+            bot.chat("private input", lambda e: None)
+        assert not bot.S.messages(1)
 
 
 def test_opt_out_blocks_learning_background_reflection_and_personal_prompt(bot):

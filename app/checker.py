@@ -16,6 +16,15 @@ MAX_CHARS = 2_000_000
 CHECK_TIMEOUT = 8
 MAX_SECONDS = 25
 
+# Node parses ECMAScript modules without linking or evaluating generated source.
+MODULE_REQUESTS = """const fs = require('node:fs'), vm = require('node:vm');
+let refs = [];
+try {
+  const mod = new vm.SourceTextModule(fs.readFileSync(0, 'utf8'));
+  refs = mod.moduleRequests ? mod.moduleRequests.map(r => r.specifier) : mod.dependencySpecifiers;
+} catch (e) { if (!(e instanceof SyntaxError)) throw e; }
+process.stdout.write(JSON.stringify(refs));"""
+
 
 def node_dir():
     local = os.path.join(config.RUNTIME, "node")
@@ -113,6 +122,7 @@ def check(project):
     if entry and posixpath.splitext(entry)[1].lower() not in (".py", ".js", ".mjs", ".cjs", ".htm", ".html", ".json"):
         skipped.append(f"No static validator for entry {entry}.")
     units = []
+    bases = {}
     checked = 0
     try:
         for name, content in files.items():
@@ -132,6 +142,7 @@ def check(project):
                 page.feed(content)
                 page.close()
                 base = urljoin("https://project.invalid/" + quote(name), page.base_href or "")
+                bases[name] = base
                 for url in page.resources:
                     parts = urlsplit(urljoin(base, url))
                     if parts.netloc == "project.invalid" and not url.startswith(("/", "#", "?")):
@@ -171,6 +182,22 @@ def check(project):
                 problems.append(f"{name}: {output.strip()[-1500:]}")
             else:
                 checked += 1
+                if mode not in ("python", "commonjs") and ("import" in content or "export" in content):
+                    remaining = MAX_SECONDS - (time.monotonic() - started)
+                    if remaining <= 0:
+                        skipped.append("Project check time limit reached.")
+                        break
+                    rc, raw, timed = run([cmd[0], "--no-warnings", "--experimental-vm-modules", "-e", MODULE_REQUESTS],
+                                         config.APP, min(remaining, CHECK_TIMEOUT), source=content)
+                    if timed or rc:
+                        skipped.append(f"{name}: module imports could not be checked.")
+                        continue
+                    base = bases.get(name, "https://project.invalid/" + quote(name))
+                    for ref in json.loads(raw):
+                        if ref.startswith(("./", "../")):
+                            target = urlsplit(urljoin(base, ref))
+                            if target.netloc == "project.invalid" and unquote(target.path).lstrip("/") not in available:
+                                problems.append(f"{name}: missing local module {ref}")
     except (OSError, ValueError, RecursionError, AssertionError) as e:
         skipped.append(f"Static checker unavailable: {e}")
     if problems:

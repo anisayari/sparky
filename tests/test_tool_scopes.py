@@ -16,9 +16,13 @@ def test_document_scope_at_dispatch(monkeypatch):
     turn = SimpleNamespace(info=0, spare=lambda: None)
     session._on_info_tool(turn, "docs", {"query": "probe"}, lambda e: None)
     assert not calls
-    session.config["docs"] = [42]
+    cid = rag.create_collection("dispatch")
+    session.config["docs"] = [cid]
     session._on_info_tool(turn, "docs", {"query": "probe"}, lambda e: None)
-    assert calls == [[42]]
+    assert calls == [[cid]]
+    rag.delete_collection(cid)
+    session._on_info_tool(turn, "docs", {"query": "probe"}, lambda e: None)
+    assert calls == [[cid]]
 
 
 def test_empty_document_selection_never_opens_database(monkeypatch):

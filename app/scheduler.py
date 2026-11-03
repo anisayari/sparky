@@ -98,8 +98,19 @@ def save_task(task, now=None):
         old = next((t for t in tasks if t["id"] == task.get("id")), None) if task.get("id") else None
         t = old or {"id": uuid.uuid4().hex[:12], "last_run": None, "last_session": None, "last_error": None,
                     "unread": False, "created": now}
+        if (t.get("run") or {}).get("phase") in ("search", "summarize", "review"):
+            raise ValueError("Terminez ou annulez la séquence en cours avant de la modifier.")
+        web = task.get("web", t.get("web", bool(old)))
+        if type(web) is not bool:
+            raise ValueError("web must be true or false")
+        collection = task.get("collection", t.get("collection"))
+        if collection is not None and type(collection) is not int:
+            raise ValueError("collection must be an identifier")
+        model = task.get("model", t.get("model"))
+        if model is not None and not isinstance(model, str):
+            raise ValueError("invalid model")
         t.update(title=(task.get("title") or prompt[:60]).strip(), prompt=prompt, when=when,
-                 enabled=bool(task.get("enabled", True)))
+                 enabled=bool(task.get("enabled", True)), web=web, model=model or None, collection=collection)
         t["next_run"] = next_run(when, now) if t["enabled"] else None
         if not old:
             tasks.append(t)
@@ -124,11 +135,14 @@ def mark_read(tid):
     _update(tid, unread=False)
 
 
-def _update(tid, **fields):
+def _update(tid, *, expected_run=None, **fields):
     with _lock:
         tasks = _load()
         for t in tasks:
             if t["id"] == tid:
+                r = t.get("run") or {}
+                if expected_run is not None and (r.get("id"), r.get("phase")) != expected_run:
+                    return None
                 t.update(fields)
                 _save(tasks)
                 return dict(t)
@@ -136,17 +150,49 @@ def _update(tid, **fields):
 
 
 # ---------------------------------------------------------------- running
+def review_result(tid, run_id, decision):
+    if decision not in ("approved", "rejected"):
+        raise ValueError("invalid review decision")
+    task = get(tid)
+    run = (task or {}).get("run") or {}
+    return _update(tid, expected_run=(run_id, "review"), run=run | {"phase": decision, "reviewed": time.time()})
+
+
+def _resuming(t):
+    return (t.get("run") or {}).get("phase") in ("search", "summarize")
+
+
 def _run(task, runner, due_at=None):
     """Runs one task now and records the outcome (the task may have been edited or deleted meanwhile).
     due_at: only run if the task is still due at that time (another run may have just rescheduled it)."""
     with _run_lock:
-        if due_at is not None:
-            task = get(task["id"])
-            if not task or not task.get("enabled") or task.get("next_run") is None or task["next_run"] > due_at:
-                return None
+        task = get(task["id"])
+        if not task or (task.get("run") or {}).get("phase") == "review":
+            return None
+        if due_at is not None and not _resuming(task) and (
+                not task.get("enabled") or task.get("next_run") is None or task["next_run"] > due_at):
+            return None
         started, sid, err = time.time(), None, None
+        run = None
         try:
-            sid = runner(task["prompt"], task["title"])
+            if task.get("collection") is not None:
+                import workflows
+                run = task.get("run") if _resuming(task) else None
+                if not run:
+                    run = workflows.new_run()
+                    if not _update(task["id"], run=run):
+                        return None
+                def checkpoint(phase, **state):
+                    nonlocal run
+                    new = run | state | {"phase": phase}
+                    if not _update(task["id"], expected_run=(run["id"], run["phase"]), run=new):
+                        raise ValueError("Séquence annulée.")
+                    run = new
+                sid = workflows.summarize(task, run, checkpoint)
+            elif runner is _runner:
+                sid = runner(task["prompt"], task["title"], task)
+            else:
+                sid = runner(task["prompt"], task["title"])
         except Exception as e:
             err = str(e) or repr(e)
             print("scheduler:", task["title"], ":", repr(e))
@@ -157,11 +203,13 @@ def _run(task, runner, due_at=None):
         once = cur["when"]["type"] == "once"
         fields = {"last_run": started, "last_error": err,
                   "next_run": None if once or not cur["enabled"] else next_run(cur["when"], done)}
+        if run:
+            fields["run"] = {k: run[k] for k in ("id", "session")} | {"phase": "failed" if err else "review"}
         if once:
             fields["enabled"] = False
         if sid:
             fields.update(last_session=sid, unread=True)
-        return _update(task["id"], **fields)
+        return _update(task["id"], expected_run=(run["id"], run["phase"]) if run else None, **fields)
 
 
 def tick(now=None, runner=None):
@@ -170,14 +218,14 @@ def tick(now=None, runner=None):
     if not runner:
         return []
     now = time.time() if now is None else now
-    due = [t for t in list_() if t.get("enabled") and t.get("next_run") is not None and t["next_run"] <= now]
-    return [t["id"] for t in sorted(due, key=lambda t: t["next_run"]) if _run(t, runner, now)]
+    due = [t for t in list_() if _resuming(t) or (t.get("enabled") and t.get("next_run") is not None and t["next_run"] <= now)]
+    return [t["id"] for t in sorted(due, key=lambda t: t["next_run"] or 0) if _run(t, runner, now)]
 
 
 def run_now(tid, wait=False, runner=None):
     """Runs a task right away (in the background unless wait). False when it does not exist."""
     task, runner = get(tid), runner or _runner
-    if not task or not runner:
+    if not task or not runner or (task.get("run") or {}).get("phase") == "review":
         return False
     if wait:
         _run(task, runner)

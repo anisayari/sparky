@@ -5,10 +5,12 @@ The catalog only offers official or widely used models; "uncensored",
 "abliterated", NSFW, etc. variants are excluded, including from Hugging Face search.
 """
 import hashlib, json, os, re, shutil, subprocess, threading, time, urllib.request
+from urllib.parse import quote
 
 import config
 
-HF = "https://huggingface.co/{repo}/resolve/main/{file}"
+HF = "https://huggingface.co/{repo}/resolve/{revision}/{file}"
+SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.I)
 M, P, CM = config.LLM_DIR, config.MMPROJ_DIR, config.COMFY_MODELS
 REF_BW = 230.0  # bandwidth (GB/s) of the benchmark machine (RTX Spark): ref_tps was measured there
 
@@ -28,6 +30,19 @@ NOWIN = config.NOWIN
 def blocked(*texts):
     t = " ".join(str(x) for x in texts).lower()
     return any(w in t for w in BLOCKED)
+
+
+def shard_paths(path, available):
+    """Return the files of a complete GGUF model, only for its first shard."""
+    match = SHARD.search(path)
+    if not match:
+        return [path]
+    count = int(match[2])
+    if match[1] != "00001" or not 2 <= count <= len(available):
+        return []
+    prefix = path[:match.start()]
+    parts = [f"{prefix}-{i:05d}-of-{count:05d}{path[-5:]}" for i in range(1, count + 1)]
+    return parts if all(p in available for p in parts) else []
 
 
 def llm(id, label, quality, repo, file, mmproj, size_gb, active_gb=None, think=True, desc="", ref_tps=None, alt=()):
@@ -183,7 +198,9 @@ def installed(m):
     if m.get("cloud"):  # cloud model: usable once its provider has a key
         import cloud
         return cloud.has_key(m["provider"])
-    files = m["files"][:1] if m["kind"] == "llm" else m["files"]
+    if m.get("custom") and not m.get("local") and not m.get("sharded") and m.get("files") and SHARD.search(m["files"][0][1] or ""):
+        return False  # Older catalog entries can point to a single shard.
+    files = (m["files"][:1] + m["files"][2:]) if m["kind"] == "llm" else m["files"]
     return all(_ok(f) for f in files if f)
 
 
@@ -229,39 +246,94 @@ def indicators(m, measured=None, sysinfo=None):
     return {"speed": 3 if secs <= 12 else 2 if secs <= 30 else 1, "fit": fit, "secs": round(secs), "measured": bool(measured)}
 
 
-def remote_size(repo, file):
-    req = urllib.request.Request(HF.format(repo=repo, file=file), method="HEAD")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return int(r.headers.get("x-linked-size") or r.headers.get("Content-Length") or 0)
+def _remote_files(entries):
+    repos = {}
+    files = []
+    for repo, name, local in filter(None, entries):
+        if not repo or not name:
+            raise ValueError("Ce modèle local doit être remis à son emplacement d'origine.")
+        if repo not in repos:
+            info = hf_get(f"models/{quote(repo)}?blobs=true")
+            revision = info.get("sha", "")
+            if not re.fullmatch(r"[a-f0-9]{40}", revision):
+                raise ValueError(f"Révision du modèle introuvable : {repo}")
+            repos[repo] = revision, {f["rfilename"]: f for f in info["siblings"]}
+        revision, siblings = repos[repo]
+        meta = siblings.get(name, {})
+        lfs = meta.get("lfs") or {}
+        digest = lfs.get("sha256") if lfs else meta.get("blobId")
+        size = meta.get("size")
+        if not re.fullmatch(r"[a-f0-9]{64}" if lfs else r"[a-f0-9]{40}", digest or "") or not isinstance(size, int) or size <= 0:
+            raise ValueError(f"Métadonnées d'intégrité absentes : {repo}/{name}")
+        url = HF.format(repo=quote(repo), revision=revision, file=quote(name))
+        files.append((url, name, local, digest, size))
+    return files
+
+
+def _matches(path, size, digest):
+    if not os.path.isfile(path) or os.path.getsize(path) != size:
+        return False
+    # Git hashes the blob header along with the contents. LFS hashes the raw bytes.
+    hasher = hashlib.sha256() if len(digest) == 64 else hashlib.sha1(f"blob {size}\0".encode())
+    with open(path, "rb") as stream:
+        while block := stream.read(4 << 20):
+            hasher.update(block)
+    return hasher.hexdigest() == digest
 
 
 def _install(mid):
     m, job = BY_ID[mid], jobs[mid]
     try:
-        files = [(r, f, l, remote_size(r, f)) for r, f, l in filter(None, m["files"])]
+        if m.get("custom") and not m.get("sharded") and m.get("files") and SHARD.search(m["files"][0][1] or ""):
+            repo, name, _ = m["files"][0]
+            with _custom_lock:
+                _hf_model(repo, name, m["kind"], None)
+        files = _remote_files(m["files"])
         job["total"] = sum(s for *_, s in files)
         prog, errors = {}, []
 
-        def one(repo, file, local, size):  # each file of the model downloads at the same time
+        def one(url, file, local, digest, size):  # each file of the model downloads at the same time
             try:
                 # Image models share adapter files. Only one job may resume or publish each destination.
                 with _jobs_lock:
                     file_lock = _file_locks.setdefault(os.path.normcase(os.path.abspath(local)), threading.Lock())
                 with file_lock:
-                    if size <= 0:
-                        raise ValueError("taille distante inconnue")
-                    if not os.path.exists(local) or os.path.getsize(local) != size:
+                    if not _matches(local, size, digest):
                         os.makedirs(os.path.dirname(local), exist_ok=True)
-                        fetch(HF.format(repo=repo, file=file), local + ".part", size, lambda n: prog.__setitem__(local, n))
-                        os.replace(local + ".part", local)
+                        part = local + ".part"
+                        marker = part + ".source.json"
+                        if config.read_json(marker) != digest:
+                            # Never append bytes from a different revision (including old unverified partials).
+                            for path in [part, part + ".segs.json", part + ".joining", *(f"{part}.{i}" for i in range(1, SEGMENTS))]:
+                                if os.path.isfile(path):
+                                    os.remove(path)
+                            config.write_json(marker, digest)
+                        cached = sum(os.path.getsize(p) for p in [part, *(f"{part}.{i}" for i in range(1, SEGMENTS))]
+                                     if os.path.isfile(p))
+                        remaining = max(0, size - cached)
+                        if size >= SEGMENT_MIN and (remaining or os.path.isfile(part + ".segs.json")):
+                            remaining += size  # joining writes a second copy before the segments are removed
+                        if shutil.disk_usage(os.path.dirname(local)).free < remaining:
+                            raise OSError(f"Espace disque insuffisant pour terminer {file} ({remaining / 2**30:.1f} Gio requis).")
+                        fetch(url, part, size, lambda n: prog.__setitem__(local, n))
+                        if not _matches(part, size, digest):
+                            os.remove(part)
+                            raise ValueError("empreinte du fichier téléchargé incorrecte")
+                        os.replace(part, local)
+                        os.remove(marker)
                     prog[local] = size
             except Exception as e:
                 errors.append(f"{file} : {e}")
 
-        threads = [threading.Thread(target=one, args=f, daemon=True) for f in files]
-        for t in threads:
-            t.start()
-        while any(t.is_alive() for t in threads):
+        # Each file already uses up to six concurrent ranges. A split GGUF may span dozens of files.
+        def download_batch(batch):
+            for file in batch:
+                one(*file)
+
+        workers = [threading.Thread(target=download_batch, args=(files[i::3],), daemon=True) for i in range(min(3, len(files)))]
+        for worker in workers:
+            worker.start()
+        while any(worker.is_alive() for worker in workers):
             job["done"] = sum(prog.values())
             time.sleep(1)
         job["done"] = sum(prog.values())
@@ -475,26 +547,29 @@ def hf_search(q, kind):
 def hf_files(repo, kind):
     if blocked(repo):
         raise RuntimeError("modèle non proposé dans Sparky")
-    info = hf_get(f"models/{repo}")
+    info = hf_get(f"models/{quote(repo)}?blobs=true")
     if blocked(*info.get("tags", [])):
         raise RuntimeError("modèle non proposé dans Sparky")
-    tree = hf_get(f"models/{repo}/tree/main?recursive=true")
-    files = [f for f in tree if f.get("type") == "file"]
+    files = [{"path": f["rfilename"], "size": f["size"]} for f in info["siblings"] if f.get("size", 0) > 0]
     if kind == "image":  # single-file SDXL checkpoints
         out = [f for f in files if f["path"].endswith(".safetensors") and f.get("size", 0) > 1.5 * 2**30
                and "/" not in f["path"] and not blocked(f["path"])]
         return {"files": [{"path": f["path"], "size_gb": round(f["size"] / 2**30, 2)} for f in out], "mmproj": None}
-    ggufs = [f for f in files if f["path"].endswith(".gguf") and not blocked(f["path"])]
-    mm = [f for f in ggufs if "mmproj" in f["path"].lower()]
+    ggufs = [f for f in files if f["path"].lower().endswith(".gguf") and not blocked(f["path"])]
+    mm = [f for f in ggufs if "mmproj" in f["path"].lower() and not SHARD.search(f["path"])]
     mm.sort(key=lambda f: (0 if "F16" in f["path"] and "BF16" not in f["path"] else 1 if "BF16" in f["path"] else 2))
-    models = [f for f in ggufs if "mmproj" not in f["path"].lower() and "mtp" not in f["path"].lower()
-              and not re.search(r"-0000[2-9]-of-", f["path"])]
+    models = [f for f in ggufs if "mmproj" not in f["path"].lower() and "mtp" not in f["path"].lower()]
+    by_path = {f["path"]: f for f in models}
     total, active = _params(repo)
     out = []
     for f in sorted(models, key=lambda f: f["size"]):
-        gb = f["size"] / 2**30
+        path = f["path"]
+        parts = shard_paths(path, by_path)
+        if not parts:
+            continue
+        gb = sum(by_path[p]["size"] for p in parts) / 2**30
         fake = {"id": "", "kind": "llm", "size_gb": gb, "active_gb": gb * (active / total) if active and total else gb}
-        out.append({"path": f["path"], "size_gb": round(gb, 2), **indicators(fake)})
+        out.append({"path": path, "size_gb": round(gb, 2), "shards": parts if len(parts) > 1 else [], **indicators(fake)})
     return {"files": out, "mmproj": mm[0]["path"] if mm else None,
             "mmproj_gb": round(mm[0]["size"] / 2**30, 2) if mm else 0, "quality": quality_guess(total)}
 
@@ -510,16 +585,22 @@ def hf_install(repo, path, kind, mmproj=None):
 
 def _hf_model(repo, path, kind, mmproj):
     # Match by origin, including entries saved with the old basename-only ID and destination.
+    previous = None
     for model in CATALOG:
         files = model.get("files")
         if model.get("custom") and model["kind"] == kind and files and files[0] and tuple(files[0][:2]) == (repo, path):
-            return model["id"]
+            if not SHARD.search(path) or model.get("sharded"):
+                return model["id"]
+            previous = model
+            break
     base = os.path.splitext(os.path.basename(path))[0]
     key = hashlib.sha256("\0".join((kind, repo, path)).encode()).hexdigest()
-    mid = "hf2:" + key
-    if mid not in BY_ID:
+    mid = previous["id"] if previous else "hf2:" + key
+    if previous or mid not in BY_ID:
         info = hf_files(repo, kind)
-        f = next(x for x in info["files"] if x["path"] == path)
+        f = next((x for x in info["files"] if x["path"] == path), None)
+        if not f:
+            raise ValueError("Fichier non proposé. Pour un modèle fractionné, sélectionnez un ensemble complet depuis la bibliothèque.")
         if kind == "image":
             m = ckpt(mid, base, 3, repo, path, f["size_gb"], desc=repo)
             m["ckpt"] = "hf-" + key + ".safetensors"
@@ -530,12 +611,23 @@ def _hf_model(repo, path, kind, mmproj):
             m = llm(mid, base, quality_guess(total), repo, path, None, f["size_gb"],
                     active_gb=f["size_gb"] * active / total if active and total else None,
                     think=any(t in repo.lower() for t in THINKERS), desc=repo)
-            m["files"][0] = (repo, path, os.path.join(M, "hf-" + key + ".gguf"))
+            shards = f.get("shards", [])
+            if shards:
+                parts = [(repo, p, os.path.join(M, "hf-" + key + SHARD.search(p)[0])) for p in shards]
+                m["sharded"] = True
+                m["files"][0] = parts[0]
+                m["files"].extend(parts[1:])
+            else:
+                m["files"][0] = (repo, path, os.path.join(M, "hf-" + key + ".gguf"))
             if mm:
                 m["files"][1] = (repo, mm, os.path.join(P, "mmproj-" + key + ".gguf"))
             m["vision"] = bool(mm)
         m.update(custom=True, qualityGuess=True, repo=repo)
-        CATALOG.append(m)
+        if previous:
+            previous.update(m)
+            m = previous
+        else:
+            CATALOG.append(m)
         BY_ID[mid] = m
         save_custom()
     return mid

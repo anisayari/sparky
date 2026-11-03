@@ -147,6 +147,8 @@ def _local(handler, b, mid, stream):
         body["stream_options"] = b["stream_options"]
     req = urllib.request.Request(LLM + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
+        import process_owner
+        process_owner.require_endpoint(req.full_url)
         r = urllib.request.urlopen(req, timeout=900)
     except urllib.error.HTTPError as e:
         raw = e.read()

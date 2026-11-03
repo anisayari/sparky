@@ -5,7 +5,7 @@ Assistants (GGUF) are used in place: Sparky never moves nor deletes them. Image 
 recognised when their files are the ones of the catalog; they are hard-linked (no extra space on
 the same disk) or copied into Sparky's ComfyUI.
 """
-import hashlib, json, os, re, shutil, string, threading, time
+import hashlib, json, os, shutil, string, threading, time
 
 import catalog
 import config
@@ -103,7 +103,7 @@ class _Scan:
                             n = e.name.lower()
                             if n.endswith(".gguf"):
                                 size = e.stat().st_size
-                                if size >= MIN_GB * 2**30 or "mmproj" in n:
+                                if size >= MIN_GB * 2**30 or catalog.SHARD.search(n) or "mmproj" in n:
                                     self.ggufs.setdefault(os.path.realpath(e.path), (e.path, size))
                             elif n in self.want and n not in self.named:
                                 self.named[n] = e.path
@@ -167,17 +167,23 @@ def find(roots, ollama=None):
         if os.path.isdir(d):
             s.walk(d, depth)
     found = sorted(s.ggufs.values(), key=lambda x: x[0].lower())
+    sizes = dict(found)
     vision = {}  # folder -> its mmproj (vision) file
     for p, _ in found:
         if "mmproj" in os.path.basename(p).lower():
             vision.setdefault(os.path.dirname(p), p)
-    for path, size in found:  # assistants
+    for path, _ in found:  # assistants
         n = os.path.basename(path).lower()
-        if any(w in n for w in NOT_CHAT) or re.search(r"-0000[2-9]-of-", n) or catalog.blocked(path):
+        if any(w in n for w in NOT_CHAT) or catalog.blocked(path):
             continue
         if os.path.normcase(os.path.realpath(path)) in used or not _gguf(path):
             continue
-        items.append(_llm_item(path, size, _source(path), mmproj=vision.get(os.path.dirname(path))))
+        parts = catalog.shard_paths(path, sizes)
+        if not parts or any(not _gguf(p) for p in parts[1:]):
+            continue
+        item = _llm_item(path, sum(sizes[p] for p in parts), _source(path), mmproj=vision.get(os.path.dirname(path)))
+        item["parts"] = parts[1:]
+        items.append(item)
     for m in catalog.CATALOG:  # image models of the catalog found complete elsewhere (another ComfyUI...)
         if m["kind"] != "image" or catalog.installed(m):
             continue
@@ -258,6 +264,7 @@ def use(key):
              "ref_tps": None, "size_gb": size, "active_gb": size * active / total if active and total else size,
              "think": any(t in name.lower() for t in catalog.THINKERS), "vision": bool(it["mmproj"]),
              "custom": True, "local": True, "qualityGuess": True}
+        m["files"].extend((None, None, p) for p in it.get("parts", ()))
         catalog.CATALOG.append(m)
         catalog.BY_ID[mid] = m
         catalog.save_custom()

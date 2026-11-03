@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -17,6 +18,7 @@ jobs:
       matrix:
         include:
           - {os: windows-latest, python: "3.10"}   # oldest Python the installer accepts
+          - {os: windows-latest, python: "3.11"}   # separate NumPy compatibility pin
           - {os: windows-latest, python: "3.13"}   # newest
           - {os: ubuntu-latest, python: "3.12"}
     steps:
@@ -32,6 +34,29 @@ jobs:
         run: python -m pip install -r requirements.txt numpy pytest ruff
       - name: Lint
         run: python -m ruff check app tests
+      - name: Enable Edge preview integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          if (-not (Test-Path -LiteralPath $edge)) { throw 'Edge is required for the preview tests' }
+          "SPARKY_TEST_BROWSER=$edge" >> $env:GITHUB_ENV
+      - name: Download and verify the release-test voice
+        if: runner.os == 'Windows' && matrix.python == '3.13'
+        shell: pwsh
+        run: |
+          $dir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'piper-test')
+          $base = 'https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/lessac/medium'
+          $hashes = @{
+            'en_US-lessac-medium.onnx' = '5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f'
+            'en_US-lessac-medium.onnx.json' = 'efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0'
+          }
+          foreach ($name in $hashes.Keys) {
+            $dest = Join-Path $dir $name
+            Invoke-WebRequest "$base/$name" -OutFile $dest
+            if ((Get-FileHash -LiteralPath $dest).Hash -ne $hashes[$name]) { throw "Invalid fixture $name" }
+          }
+          "SPARKY_TEST_PIPER_DIR=$dir" >> $env:GITHUB_ENV
       - name: Tests
         run: python -m pytest
 
@@ -49,3 +74,29 @@ jobs:
             if ($errors) { $errors | ForEach-Object { Write-Error "$f : $_" }; exit 1 }
             Write-Host "$f OK"
           }
+
+  release-smoke:
+    name: Fresh Windows ZIP installation (chat)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install and start from the shipped sources
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'sparky-release.zip'
+          $dest = Join-Path $env:RUNNER_TEMP 'Sparky Chat'
+          git archive --format=zip -o $zip HEAD
+          if ($LASTEXITCODE) { throw 'Cannot create release archive' }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dest
+          & (Join-Path $dest 'install.ps1') -ChatOnly -NoModels -Yes -NoLaunch -NoShortcuts
+          if (!(Test-Path (Join-Path $dest 'runtime/llama/llama-server.exe'))) { throw 'Missing chat engine' }
+          if (Test-Path (Join-Path $dest 'runtime/ComfyUI')) { throw 'Unexpected Studio installation' }
+          try {
+            & (Join-Path $dest 'start.ps1') -NoBrowser -NonInteractive
+            if (-not (Invoke-RestMethod http://127.0.0.1:7860/api/instance).instance) { throw 'Missing instance response' }
+          } finally { & (Join-Path $dest 'stop.ps1') }

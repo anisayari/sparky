@@ -56,13 +56,15 @@ def test_speak_without_voice_fails(monkeypatch):
 
 
 # the test config points VOICE_DIR at a temp folder: reuse a voice from the real models/voice/piper if present
-REAL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "voice", "piper")
+REAL = os.environ.get("SPARKY_TEST_PIPER_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "voice", "piper")
 
 
-@pytest.mark.skipif(not (tts.installed() and os.path.exists(os.path.join(REAL, "en_US-lessac-medium.onnx.json"))),
+@pytest.mark.skipif(not os.environ.get("SPARKY_TEST_PIPER_DIR")
+                    and not (tts.installed() and os.path.exists(os.path.join(REAL, "en_US-lessac-medium.onnx.json"))),
                     reason="onnxruntime/espeakng-loader or the English Piper voice not installed")
 def test_real_synthesis(monkeypatch):
     monkeypatch.setattr(tts, "DIR", REAL)
+    assert tts.installed() and tts.ready("en_US-lessac-medium")
     data = tts.speak("## Hello\n\nThis is **Sparky**. It reads replies aloud, sentence by sentence!", "en")
     with wave.open(io.BytesIO(data)) as w:
         assert w.getframerate() == 22050 and w.getsampwidth() == 2

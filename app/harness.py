@@ -5,13 +5,18 @@ generation it receives the produced image (and the references used) to check it 
 fix it itself if needed, up to MAX_STEPS steps per message.
 """
 import base64, contextlib, io, json, os, random, re, threading, time, urllib.error, urllib.request, uuid
+from contextvars import ContextVar
 
 from PIL import Image, ImageDraw
 
 import config
+import chat_state
+import copy
+import turn_runtime
 
 COMFY = f"http://127.0.0.1:{config.COMFY_PORT}"
 LLM = f"http://127.0.0.1:{config.LLM_PORT}"
+required_model = ContextVar("required_model", default=None)
 COMFY_IN = config.COMFY_IN
 COMFY_OUT = config.COMFY_OUT
 LORA_DIR = os.path.join(config.COMFY_MODELS, "loras")
@@ -47,6 +52,7 @@ SETTINGS = {"llm": None, "ckpt": None, "steps": 30, "cfg": 5.5, "max_steps": 6, 
             "llm_ctx": 0}  # context window of the local assistant, in tokens (0 = automatic, from the memory left)
 INFO_TOOLS = ("search", "fetch", "docs", "tool")  # read-only tools: their results come back as notes
 MAX_INFO = 6  # read-only tool calls per message
+ACTIVE_CONTEXT = 0  # exact llama.cpp window set by server.launch_llm
 
 
 def load_settings():
@@ -95,6 +101,8 @@ def system_prompt():
 
 # ---------------------------------------------------------------- utilities
 def http_json(url, payload=None, timeout=900):
+    import process_owner
+    process_owner.require_endpoint(url)
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data, {"Content-Type": "application/json"})
     try:
@@ -107,15 +115,20 @@ def http_json(url, payload=None, timeout=900):
 def cloud_model():
     """Catalog entry of the active assistant when it is a cloud model (OpenRouter, Claude...), else None."""
     import catalog
-    m = catalog.BY_ID.get(SETTINGS.get("llm"))
+    active = SETTINGS.get("llm")
+    if required_model.get() is not None and required_model.get() != active:
+        raise RuntimeError("Le modèle prévu pour cette tâche n’est plus actif.")
+    m = catalog.BY_ID.get(active)
     return m if m and m.get("cloud") else None
 
 
 def llama_deltas(body):
     """Streams llama-server's answer: yields (text, reasoning) pieces."""
+    import process_owner
+    process_owner.require_endpoint(LLM + "/v1/chat/completions")
     req = urllib.request.Request(LLM + "/v1/chat/completions", json.dumps(body | {"stream": True}).encode(),
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=900) as r:
+    with urllib.request.urlopen(req, timeout=900) as r, turn_runtime.response(r):
         for raw in r:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data: ") or line == "data: [DONE]":
@@ -343,17 +356,37 @@ def comfy_run(graph):
     return out
 
 
-def _comfy_run(graph):
-    pid = http_json(COMFY + "/prompt", {"prompt": graph})["prompt_id"]
-    while True:
-        time.sleep(1)
-        h = http_json(f"{COMFY}/history/{pid}")
-        if pid in h:
-            e = h[pid]
-            break
+def comfy_result(graph, max_seconds=1800):
+    turn_runtime.check()
+    deadline = time.monotonic() + max_seconds
+    pid = http_json(COMFY + "/prompt", {"prompt": graph}, timeout=min(30, max_seconds))["prompt_id"]
+    try:
+        while True:
+            turn_runtime.check()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("ComfyUI : délai maximal de génération dépassé.")
+            h = http_json(f"{COMFY}/history/{pid}", timeout=min(10, remaining))
+            if pid in h:
+                e = h[pid]
+                break
+            time.sleep(min(1, remaining))
+    except (TimeoutError, turn_runtime.Cancelled):
+        # Older engines only support removing a specific item from their pending queue.
+        try:
+            http_json(f"{COMFY}/api/jobs/{urllib.parse.quote(str(pid), safe='')}/cancel", {}, timeout=3)
+        except Exception:
+            with contextlib.suppress(Exception):
+                http_json(COMFY + "/queue", {"delete": [pid]}, timeout=3)
+        raise
     if e["status"]["status_str"] != "success":
         errs = [m[1].get("exception_message", "") for m in e["status"].get("messages", []) if m[0] == "execution_error"]
         raise RuntimeError("ComfyUI : " + (errs[0] if errs else "echec"))
+    return e
+
+
+def _comfy_run(graph):
+    e = comfy_result(graph)
     im = [i for o in e["outputs"].values() for i in o.get("images", [])][0]
     return os.path.join(COMFY_OUT, im.get("subfolder", ""), im["filename"])
 
@@ -490,16 +523,29 @@ def detect_lang(text, weak=False):
 # ---------------------------------------------------------------- session / agent
 class Session:
     def __init__(self, sid=None, ephemeral=False):
-        self.id = sid or time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         self.ephemeral = ephemeral
-        self.dir = os.path.join(DATA, "_tmp" if ephemeral else "", self.id)
-        os.makedirs(self.dir, exist_ok=True)
+        parent = os.path.join(DATA, "_tmp" if ephemeral else "")
+        os.makedirs(parent, exist_ok=True)
+        while True:
+            self.id = sid or time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+            self.dir = os.path.join(parent, self.id)
+            try:
+                os.makedirs(self.dir, exist_ok=sid is not None)
+                break
+            except FileExistsError:
+                if sid is not None:
+                    raise
         self.images = {}   # id -> {path, kind, desc}
         self.masks = {}    # image id -> path of the painted mask
         self.history = []  # [{role, text, images}]
+        self._source_count = 0
         self.events = []   # to rebuild the UI
         self.n = 0
         self.lock = threading.Lock()
+        self._storage_lock = threading.Lock()
+        self._deleted = False
+        self._run_guard = threading.Lock()
+        self._running = None  # (turn id, cancellation event) while a turn holds the conversation lock
         self._durls = {}
         self.boxes = {}  # cache of locate results
         self._emit = self._ev = lambda e: None
@@ -509,11 +555,14 @@ class Session:
         self.projects = {}   # id -> {title, entry, files: {path: content}, version}: multi-file projects
         self._pending = []   # actions left over from a response that packed several of them
         self._approvals = {}  # computer mode: approval id -> {event, decision}
+        self._computer_lock = threading.RLock()
+        self._computer_epoch = 0
         # per-conversation setup: assistant preset, own instructions, knowledge collections, web access
         self.config = {"assistant": None, "system": "", "docs": [], "web": False, "computer": "off"}
         self.meta = {"title": None, "pinned": False, "folder": None}  # set by the user (sidebar)
         self.turns = []  # [(history length, events length)] at the start of each user message (edit / regenerate)
         self.alts = {}   # "k" -> [{history, events}]: other versions of everything from user message k on
+        self._legacy_images = {}
 
     # -- persistence
     def title(self):
@@ -525,12 +574,18 @@ class Session:
     def save(self):
         if self.ephemeral:
             return
-        st = {k: getattr(self, k) for k in ("images", "masks", "history", "events", "n", "lang", "artifacts", "projects",
-                                            "config", "meta", "turns", "alts")}
-        st["local_consent_version"] = 1
-        st["title"] = self.meta.get("title") or self.title()
-        with open(os.path.join(self.dir, "session.json"), "w", encoding="utf-8") as f:
-            json.dump(st, f, ensure_ascii=False)
+        with self._storage_lock:
+            if self._deleted:
+                return
+            st = {k: getattr(self, k) for k in ("images", "masks", "history", "events", "n", "lang", "artifacts",
+                                                "projects", "config", "meta", "turns", "alts")}
+            st["local_consent_version"] = 1
+            st["resource_version"] = 1
+            if self._legacy_images:
+                st["legacy_images"] = self._legacy_images
+            st["checkpoint"] = self._running is not None
+            st["title"] = self.meta.get("title") or self.title()
+            config.write_json(os.path.join(self.dir, "session.json"), st)
 
     @staticmethod
     def list_all():
@@ -552,7 +607,16 @@ class Session:
 
     def delete(self):
         import shutil
-        shutil.rmtree(self.dir, ignore_errors=True)
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            with self._storage_lock:
+                if os.path.isdir(self.dir):
+                    shutil.rmtree(self.dir)
+                self._deleted = True
+            return True
+        finally:
+            self.lock.release()
 
     @classmethod
     def load(cls, sid):
@@ -574,6 +638,15 @@ class Session:
             s.meta.update(st.get("meta") or {})
             s.turns = [tuple(x) for x in st.get("turns", [])]
             s.alts = st.get("alts", {})
+            if s.alts and not st.get("resource_version"):
+                # Older versions shared one image inventory and mutable project files across all branches.
+                s._legacy_images = s.images
+                chat_state.rebuild(s, s.images, {})
+            else:
+                s._legacy_images = {int(i): v for i, v in st.get("legacy_images", {}).items()}
+            if s.events and s.events[-1].get("type") != "done" and st.get("checkpoint"):
+                s.events.append({"type": "done", "status": "interrupted", "ts": time.time()})
+                s.save()
         return s
 
 
@@ -790,18 +863,21 @@ class Session:
                 text = original
         elif text.startswith("[DOCUMENTS]\n" + marker):
             text = "[DOCUMENTS]"
-        allowed = [hit | {"source_number": n} for n, hit in enumerate(h.get("rag_hits", []), 1)
-                   if hit.get("collection_id") in selected]
+        allowed = rag.live_hits(h.get("rag_hits", []), selected)
         if allowed:
             text += "\n[" + rag.context_block(allowed) + "]"
         return text
 
-    def llm_messages(self):
+    def llm_messages(self, with_anchor=False):
         # The start of the context must stay IDENTICAL from one turn to the next so llama.cpp reuses
         # its cache (otherwise it rereads everything, images included: 20-30 s). So the history is only trimmed
         # and images only dropped in large batches, rarely.
         n = len(self.history)
         hist = self.history[(((n - 40) // 16 + 1) * 16) if n > 40 else 0:]
+        request = next((h for h in reversed(self.history) if h.get("role") == "user" and "raw" in h), None)
+        if request is not None and not any(h is request for h in hist):
+            hist = [request, *hist]
+        anchor = None
         import catalog
         cur = catalog.BY_ID.get(SETTINGS["llm"])
         vision = catalog.has_vision(cur) if cur else True
@@ -813,6 +889,8 @@ class Session:
                  + ("" if vision else "\nNOTE: you cannot see images in this session; rely on their descriptions.")}]
         selected = set(self.doc_ids())
         for h in hist:
+            if h is request:
+                anchor = len(msgs)
             if h["role"] == "assistant":
                 msgs.append({"role": "assistant", "content": h["text"]})
                 continue
@@ -827,7 +905,7 @@ class Session:
         # the image inventory changes every turn: put it at the END (cache intact)
         if msgs[-1]["role"] == "user":
             msgs[-1]["content"] = msgs[-1]["content"] + [{"type": "text", "text": self.catalog()}]
-        return msgs
+        return (msgs, anchor) if with_anchor else msgs
 
     # -- setup of the conversation (assistant, instructions, knowledge, web, MCP tools)
     def assistant(self):
@@ -835,10 +913,12 @@ class Session:
         return workspace.assistant(self.config.get("assistant")) or {}
 
     def doc_ids(self):
-        return sorted({int(x) for x in (self.config.get("docs") or []) + (self.assistant().get("docs") or [])})
+        import rag
+        chosen = set(self.config.get("docs") or []) | set(self.assistant().get("docs") or [])
+        return rag.existing_collections(chosen - set(self.config.get("excluded_docs") or []))
 
     def web_on(self):
-        return bool(self.config.get("web") or self.assistant().get("web"))
+        return not self.config.get("web_blocked") and bool(self.config.get("web") or self.assistant().get("web"))
 
     def setup_prompt(self):
         """Added to the system prompt; stays the same during a conversation (llama.cpp cache)."""
@@ -881,18 +961,32 @@ class Session:
         return ("\n\n" + "\n\n".join(out)) if out else ""
 
     # -- computer mode (computer.py): the user approves the actions their security level does not allow by itself
+    def set_computer_level(self, level):
+        import computer
+        with self._computer_lock:
+            if level not in computer.LEVELS or level == self.config.get("computer"):
+                return
+            self.config.update(computer=level, computer_allow=[])
+            self._computer_epoch += 1
+            for card in self._approvals.values():
+                card["decision"] = "deny"
+                card["event"].set()
+
     def approve(self, aid, decision):
-        a = self._approvals.get(aid)
-        if not a:
-            return False
-        a["decision"] = decision if decision in ("once", "always", "deny") else "deny"
-        a["event"].set()
-        return True
+        with self._computer_lock:
+            card = self._approvals.get(aid)
+            if not card or card["event"].is_set():
+                return False
+            card["decision"] = decision if decision in ("once", "always", "deny") else "deny"
+            card["event"].set()
+            return True
 
     def _on_computer(self, t, args, ev):
         import computer
         tool = str(args.get("tool") or "")
-        level = self.config.get("computer") or "off"
+        with self._computer_lock:
+            level = self.config.get("computer") or "off"
+            epoch = self._computer_epoch
         if tool not in computer.TOOLS:
             return self._note(f"[ORDINATEUR] Outil inconnu « {tool} ». Outils : {', '.join(computer.TOOLS)}.")
         t.computer += 1
@@ -921,18 +1015,31 @@ class Session:
         if need == "ask":
             aid = uuid.uuid4().hex[:10]
             preview = str(args.get("content") or "") if tool == "write" else ""
-            self._approvals[aid] = {"event": threading.Event(), "decision": "deny"}
+            card = {"event": threading.Event(), "decision": "deny"}
+            with self._computer_lock:
+                turn_runtime.check()
+                if epoch != self._computer_epoch:
+                    return self._note("[REFUSÉ] Les autorisations ont changé.")
+                self._approvals[aid] = card
             ev({"type": "approve", "id": aid, "preview": preview} | info)
-            self._approvals[aid]["event"].wait(900)
-            decision = self._approvals.pop(aid)["decision"]
+            card["event"].wait(900)
+            with self._computer_lock:
+                self._approvals.pop(aid, None)
+                decision = card["decision"] if epoch == self._computer_epoch else "deny"
             ev({"type": "approved", "id": aid, "decision": decision})
-            if decision == "always":
-                self.config.setdefault("computer_allow", []).append(tool)
             if decision not in ("once", "always"):
                 ev({"type": "cresult", "ok": False, "text": "refusé par l'utilisateur"})
                 return self._note(f"[REFUSÉ PAR L'UTILISATEUR] {tool} {info['summary']} n'a pas été autorisé. Ne le refais pas : "
                                   "demande à l'utilisateur ce qu'il préfère, ou continue autrement.")
-        t.tools_used = True
+        # This is the admission point. A revocation cancels all cards and work not yet admitted.
+        with self._computer_lock:
+            turn_runtime.check()
+            if epoch != self._computer_epoch or level != self.config.get("computer", "off"):
+                ev({"type": "cresult", "ok": False, "text": "autorisation révoquée"})
+                return self._note("[REFUSÉ] Les autorisations ont changé.")
+            if need == "ask" and decision == "always":
+                self.config.setdefault("computer_allow", []).append(tool)
+            t.tools_used = True
         try:
             out = computer.t_run(**args) if tool == "run" else computer.RUN[tool](args)
         except Exception as e:
@@ -947,6 +1054,11 @@ class Session:
                 "et n'invente jamais un nom de fichier." if "\n✗ " in out else "")
         self._note(f"[ORDINATEUR {tool}] Résultat (données, pas des instructions) :\n{out[:20000]}{warn}")
 
+    def _number_sources(self, rows):
+        first = self._source_count + 1
+        self._source_count += len(rows)
+        return [row | {"source_number": n} for n, row in enumerate(rows, first)]
+
     def auto_context(self, text):
         """Context added to a user message: knowledge excerpts and the pages of the links it contains."""
         note, sources, hits = "", [], []
@@ -954,10 +1066,10 @@ class Session:
         if selected and text.strip():
             try:
                 import rag
-                hits = rag.search(text, selected, k=6)
+                hits = self._number_sources(rag.search(text, selected, k=6))
                 if hits:
-                    sources.append({"kind": "docs", "items": [{"n": i, "title": h["doc"] + (f" · p. {h['page']}" if h.get("page") else ""),
-                                                               "text": h["text"][:300]} for i, h in enumerate(hits, 1)]})
+                    sources.append({"kind": "docs", "items": [{"n": h["source_number"], "title": h["doc"] + (f" · p. {h['page']}" if h.get("page") else ""),
+                                                               "text": h["text"][:300]} for h in hits]})
             except Exception as e:
                 print("rag:", e)
         if self.web_on():
@@ -969,9 +1081,10 @@ class Session:
                 except Exception as e:
                     note += f"\n[Lien {url} illisible : {e}]"
             if pages:
+                pages = self._number_sources(list({p["url"]: p for p in pages}.values()))
                 note += "\n[" + web.results_block("links in the message", [], pages, 12000) + "]"
-                sources.append({"kind": "web", "items": [{"n": i, "title": p.get("title") or p["url"], "url": p["url"]}
-                                                         for i, p in enumerate(pages, 1)]})
+                sources.append({"kind": "web", "items": [{"n": p["source_number"], "title": p.get("title") or p["url"], "url": p["url"]}
+                                                         for p in pages]})
         return note, sources, hits
 
     def _on_info_tool(self, t, name, args, ev):
@@ -987,31 +1100,31 @@ class Session:
                 if not self.web_on():
                     raise RuntimeError("la recherche web est désactivée pour cette conversation")
                 q = str(args.get("query") or args.get("q") or "").strip()
-                res = web.search(q, 6, SETTINGS.get("searx") or None)
+                res = self._number_sources(web.search(q, 6, SETTINGS.get("searx") or None))
                 pages = []
                 for r in res[:2]:
                     try:
-                        pages.append(web.fetch(r["url"], 5000))
+                        pages.append(web.fetch(r["url"], 5000) | {"url": r["url"]})
                     except Exception:
                         pass
-                ev({"type": "sources", "kind": "web", "items": [{"n": i, "title": r["title"], "url": r["url"],
-                                                                 "text": r.get("snippet", "")[:200]} for i, r in enumerate(res, 1)]})
+                ev({"type": "sources", "kind": "web", "items": [{"n": r["source_number"], "title": r["title"], "url": r["url"],
+                                                                 "text": r.get("snippet", "")[:200]} for r in res]})
                 return self._note("[RECHERCHE WEB]\n" + web.results_block(q, res, pages, 5000))
             if name == "fetch":
                 import web
                 if not self.web_on():
                     raise RuntimeError("l'accès web est désactivé pour cette conversation")
-                p = web.fetch(str(args.get("url") or ""), 15000)
-                ev({"type": "sources", "kind": "web", "items": [{"n": 1, "title": p.get("title") or p["url"], "url": p["url"]}]})
+                p, = self._number_sources([web.fetch(str(args.get("url") or ""), 15000)])
+                ev({"type": "sources", "kind": "web", "items": [{"n": p["source_number"], "title": p.get("title") or p["url"], "url": p["url"]}]})
                 return self._note("[PAGE WEB]\n" + web.results_block("page", [], [p], 15000))
             if name == "docs":
                 import rag
                 selected = self.doc_ids()
                 if not selected:
                     raise RuntimeError("aucune collection autorisée pour cette conversation")
-                hits = rag.search(str(args.get("query") or ""), selected, k=6)
-                ev({"type": "sources", "kind": "docs", "items": [{"n": i, "title": h["doc"] + (f" · p. {h['page']}" if h.get("page") else ""),
-                                                                  "text": h["text"][:300]} for i, h in enumerate(hits, 1)]})
+                hits = self._number_sources(rag.search(str(args.get("query") or ""), selected, k=6))
+                ev({"type": "sources", "kind": "docs", "items": [{"n": h["source_number"], "title": h["doc"] + (f" · p. {h['page']}" if h.get("page") else ""),
+                                                                  "text": h["text"][:300]} for h in hits]})
                 self.history.append({"role": "user", "images": [], "text": "[DOCUMENTS]" if hits else "[DOCUMENTS] Aucun passage trouvé.",
                                      "rag_hits": hits})
                 return
@@ -1028,7 +1141,9 @@ class Session:
     def _tail(self, k):
         h, e = self.turns[k]
         return {"history": self.history[h:], "events": self.events[e:], "turns": self.turns[k:],
-                "alts": {x: v for x, v in self.alts.items() if int(x) > k}}
+                "alts": {x: v for x, v in self.alts.items() if int(x) > k},
+                "images": copy.deepcopy(self.images), "masks": dict(self.masks),
+                "artifacts": copy.deepcopy(self.artifacts), "projects": copy.deepcopy(self.projects)}
 
     def _cut(self, k):
         h, e = self.turns[k]
@@ -1046,7 +1161,16 @@ class Session:
         v["list"][v["cur"]] = self._tail(k)
         v["list"].append(None)
         v["cur"] = len(v["list"]) - 1
+        images, masks = self.images, self.masks
         self._cut(k)
+        chat_state.rebuild(self, images, {})
+        # A regenerated user message reuses its attached images and original painted mask.
+        self.images.update({i: images[i] for i in user.get("images", []) if i in images})
+        iid, name = user.get("maskFor"), user.get("maskName")
+        if iid and isinstance(name, str) and name == os.path.basename(name) and name.startswith(f"mask_{iid}_"):
+            self.masks[iid] = os.path.join(self.dir, name)
+        elif iid in masks:
+            self.masks[iid] = masks[iid]
         return user
 
     def switch_version(self, k, j):
@@ -1061,11 +1185,20 @@ class Session:
         self.events += tail["events"]
         self.turns += [tuple(x) for x in tail["turns"]]
         self.alts.update(tail.get("alts") or {})
+        images = {int(i): v for i, v in tail.get("images", self._legacy_images or self.images).items()}
+        masks = {int(i): p for i, p in tail.get("masks", self.masks).items()}
+        chat_state.rebuild(self, images, masks)
+        if "artifacts" in tail:
+            self.images, self.masks = images, masks
+            self.artifacts, self.projects = tail["artifacts"], tail["projects"]
         v["list"][j], v["cur"] = None, j
         self.save()
 
     def versions(self):
         return {k: {"n": len(v["list"]), "cur": v["cur"]} for k, v in self.alts.items()}
+
+    def fork(self, k, after_reply=True):
+        return chat_state.fork(self, k, after_reply)
 
     def ask_llm(self, retry=True, think=None, dry=False):
         import catalog, zlib
@@ -1073,13 +1206,17 @@ class Session:
             think = SETTINGS.get("think", "off") if catalog.BY_ID.get(SETTINGS["llm"], {}).get("think") else "off"
         effort, budget = THINK.get(think, THINK["off"])
         kw = {"enable_thinking": bool(effort)} | ({"reasoning_effort": effort} if effort else {})
-        body = {"messages": self.llm_messages(), "temperature": 0.6 if effort else 0.4, "max_tokens": 14000 + budget,
+        model = catalog.BY_ID.get(SETTINGS.get("llm")) or {}
+        window = model.get("context") if model.get("cloud") else ACTIVE_CONTEXT or SETTINGS.get("llm_ctx")
+        messages, anchor = self.llm_messages(with_anchor=True)
+        messages, max_tokens = turn_runtime.fit(messages, window or 16384, 14000 + budget, anchor)
+        body = {"messages": messages, "temperature": 0.6 if effort else 0.4, "max_tokens": max_tokens,
                 "stream": True, "response_format": {"type": "json_object"}, "chat_template_kwargs": kw}
         if dry:  # llama.cpp anti-repetition, only after a loop (it can hurt legitimately repetitive code)
             body |= {"dry_multiplier": 0.8, "dry_base": 1.75, "dry_allowed_length": 6, "temperature": 0.7}
         t, rs, last, t0, t_rs, chk, looped = "", "", 0.0, time.time(), None, 0, False
         js = {"pos": 0, "depth": 0, "str": False, "esc": False, "done": False}
-        with busy("llm"), contextlib.closing(chat_deltas(body, think)) as deltas:
+        with busy("llm"), contextlib.closing(turn_runtime.stream(lambda: chat_deltas(body, think))) as deltas:
             for piece, reasoning in deltas:
                 t += piece
                 rs += reasoning
@@ -1359,6 +1496,7 @@ class Session:
         self.history.append({"role": "user", "images": list(images), "text": text})
 
     def _start_turn(self, text, uploads, mask, mask_for, files, ev, redo=None, kind=None):
+        self._source_count = 0
         self.turns.append((len(self.history), len(self.events)))
         if kind == "continue":  # "Continue" button: no visible user message
             self.history.append({"role": "user", "images": [], "text": "[CONTINUE] The user clicked \"Continue\": write the next "
@@ -1373,7 +1511,7 @@ class Session:
         if self.ephemeral:  # a mask is only used by ComfyUI editing
             mask = None
         if mask is not None and mask_for in self.images:
-            p = os.path.join(self.dir, f"mask_{mask_for}_{len(self.masks)}.png")
+            p = os.path.join(self.dir, f"mask_{mask_for}_{uuid.uuid4().hex}.png")
             mask.save(p)
             self.masks[mask_for] = p
             note += f"\n[L'utilisateur a peint une zone sur l'image #{mask_for} : pour la modifier, edit avec region \"mask\".]"
@@ -1390,9 +1528,12 @@ class Session:
         if redo:  # edited or regenerated message: same attachments as the original
             fnote, finfo = redo.get("note", ""), redo.get("files") or []
         ctx, sources, hits = self.auto_context(text)
+        painted = redo.get("maskFor") if redo else mask_for if mask is not None else None
+        mask_name = os.path.basename(self.masks[painted]) if painted in self.masks else None
         self.history.append({"role": "user", "text": (text or ("(fichiers)" if finfo else "(images)")) + fnote + ctx,
-                             "images": ids, "raw": text, "note": fnote, "files": finfo, "rag_hits": hits})
-        ev({"type": "user", "text": text, "images": ids, "maskFor": mask_for if mask is not None else None, "files": finfo})
+                             "images": ids, "raw": text, "note": fnote, "files": finfo, "rag_hits": hits,
+                             "maskFor": painted, "maskName": mask_name})
+        ev({"type": "user", "text": text, "images": ids, "maskFor": painted, "maskName": mask_name, "files": finfo})
         for s in sources:
             ev({"type": "sources"} | s)
 
@@ -1583,7 +1724,18 @@ class Session:
         self.history.append({"role": "assistant", "text": json.dumps({"action": "reply", "args": {"text": text}}, ensure_ascii=False)})
         ev({"type": "reply", "text": text})
 
-    def turn(self, text, uploads, mask, mask_for, emit, files=(), kind=None, rewind=None):
+    def cancel_turn(self, turn_id):
+        with self._run_guard:
+            if self._running is None or self._running[0] != turn_id:
+                return False
+            self._running[1].set()
+            with self._computer_lock:
+                for approval in self._approvals.values():
+                    approval["decision"] = "deny"
+                    approval["event"].set()
+            return True
+
+    def turn(self, text, uploads, mask, mask_for, emit, files=(), kind=None, rewind=None, turn_id=None):
         """One user message -> actions until a reply. rewind=k: edit (text) / regenerate (text None) user message k."""
         def ev(e):
             e.setdefault("ts", time.time())
@@ -1591,24 +1743,39 @@ class Session:
             emit(e)
 
         with self.lock:
+            if self._deleted:
+                emit({"type": "error", "text": "Conversation supprimée."})
+                emit({"type": "done", "status": "failed"})
+                return "failed"
             self._emit, self._ev, self._read = emit, ev, False
-            redo = None
-            if rewind is not None:
-                old = self.rewind(rewind)
-                redo = {"images": old.get("images"), "note": old.get("note", ""), "files": old.get("files")}
-                if text is None:  # regenerate: same text
-                    text = old.get("raw", old.get("text", ""))
-            self._start_turn(text or "", uploads, mask, mask_for, files, ev, redo, kind)
+            token = threading.Event()
+            with self._run_guard:
+                self._running = (turn_id or uuid.uuid4().hex, token)
+            turn_runtime.local.token = token
+            outcome = "completed"
             try:
+                if turn_id:
+                    emit({"type": "started", "turnId": turn_id})
+                redo = None
+                if rewind is not None:
+                    old = self.rewind(rewind)
+                    redo = {k: old.get(k) for k in ("images", "note", "files", "maskFor")}
+                    redo["note"] = redo["note"] or ""
+                    if text is None:
+                        text = old.get("raw", old.get("text", ""))
+                self._start_turn(text or "", uploads, mask, mask_for, files, ev, redo, kind)
                 t = _Turn(int(SETTINGS["max_steps"]), {e["text"].strip() for e in self.events if e.get("type") == "reply"})
                 self._pending = []
                 for it in range(t.max_steps + 1 + 60):
+                    self.save()  # durable boundary: completed tool actions are never replayed on restart
+                    turn_runtime.check()
                     t.step = it - t.free
                     if t.step > t.max_steps:
                         break
                     if t.step == t.max_steps:
                         self._note("[Plus d'etape disponible : reponds maintenant avec action reply.]")
                     act = self._next_action(ev)
+                    turn_runtime.check()
                     name, args = act.get("action"), act.get("args") or {}
                     if self.ephemeral and name in ("generate", "edit"):
                         # Finish this turn before queuing an image, preparing refs, or replaying packed actions.
@@ -1640,11 +1807,25 @@ class Session:
                         self._on_image_tool(t, name, args, ev)
                 if not t.replied:
                     self._give_up(t, ev)
+                    outcome = "incomplete"
+            except turn_runtime.Cancelled:
+                outcome = "cancelled"
             except Exception as e:
+                outcome = "failed"
                 ev({"type": "error", "text": f"assistant indisponible : {e}"})
             finally:
-                ev({"type": "done"})
-                self.save()
+                with self._run_guard:
+                    self._running = None
+                turn_runtime.local.token = None
+                done = {"type": "done", "status": outcome, "ts": time.time()}
+                self.events.append(done)
+                try:
+                    self.save()
+                except OSError as exc:
+                    outcome = done["status"] = "failed"
+                    emit({"type": "error", "text": f"Sauvegarde impossible : {exc}"})
+                emit(done)
+            return outcome
 
 
 class _Turn:

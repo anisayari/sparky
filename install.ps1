@@ -10,10 +10,13 @@
 #                                            (by default they are chosen in the browser at first launch)
 #   -Yes             / $env:SPARKY_YES       answer yes to every question (English unless -Lang)
 #   -NoLaunch        / $env:SPARKY_NOLAUNCH  do not open Sparky at the end
+#   -NoShortcuts                              leave the desktop and Start menu unchanged
+#   -ChatOnly        / $env:SPARKY_CHAT_ONLY  skip PyTorch, ComfyUI and Studio model downloads
 #
 # This file is pure ASCII on purpose (a BOM would break "irm | iex"): accents and symbols are
 # written as \uXXXX and decoded at runtime.
-param([string]$Dir = "", [string]$Lang = "", [switch]$Models, [switch]$NoModels, [switch]$Yes, [switch]$NoLaunch)
+param([string]$Dir = "", [string]$Lang = "", [switch]$Models, [switch]$NoModels, [switch]$Yes, [switch]$NoLaunch,
+      [switch]$ChatOnly, [switch]$NoShortcuts)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -25,6 +28,7 @@ if (-not $Dir -and $env:SPARKY_DIR) { $Dir = $env:SPARKY_DIR }
 if ($env:SPARKY_MODELS) { $Models = $true }
 if ($env:SPARKY_NOMODELS) { $NoModels = $true }   # old option: models are no longer downloaded by default
 if ($env:SPARKY_NOLAUNCH) { $NoLaunch = $true }
+if ($env:SPARKY_CHAT_ONLY -eq '1') { $ChatOnly = $true }
 if ($env:SPARKY_YES) { $Yes = $true }
 $Interactive = -not $Yes
 
@@ -110,7 +114,7 @@ function Run([string]$label, [string]$exe, [string[]]$argv, [string]$hint = '') 
   Write-Host (Fmt ((Get-Date) - $t0).TotalSeconds) -ForegroundColor DarkGray
 }
 # download with a progress bar (curl.exe is built into Windows 10+)
-function Fetch([string]$label, [string]$url, [string]$file, [double]$size = 0) {
+function Fetch([string]$label, [string]$url, [string]$file, [double]$size = 0, [string]$sha256 = '') {
   if (-not $size) { try { $size = [double](Invoke-WebRequest $url -Method Head -UseBasicParsing).Headers['Content-Length'] } catch { $size = 0 } }
   if (Test-Path $file) { Remove-Item $file -Force }
   $p = Start-Process curl.exe -ArgumentList '-L', '-s', '--fail', '--retry', '5', '-o', ('"' + $file + '"'), $url -PassThru -WindowStyle Hidden
@@ -128,6 +132,9 @@ function Fetch([string]$label, [string]$url, [string]$file, [double]$size = 0) {
   $p.WaitForExit()
   Clear-Line
   if ($p.ExitCode -ne 0 -or -not (Test-Path $file)) { Fail ((T 'dlfail') + " " + $url) }
+  if ($sha256 -and (($sha256 -notmatch '^[a-f0-9]{64}$') -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $sha256)) {
+    Fail ("SHA-256 mismatch: " + $label)
+  }
   Ok ($label + "   " + ("{0:N0} MB" -f ((Get-Item $file).Length / 1MB)))
 }
 
@@ -299,39 +306,56 @@ Ok (([string](& $vpy --version)).Trim())
 
 # ------------------------------------------------------------------ 4. PyTorch + ComfyUI
 Step (T 's4')
-$hasTorch = (& $vpy -c "import importlib.util;print(importlib.util.find_spec('torch') is not None)") -eq 'True'
-if (-not $hasTorch) {
-  if ($nvidia -and $arch -eq 'arm64') {
-    Run (T 'torch') $vpy @('-m', 'pip', 'install', '--pre', '--only-binary=:all:', '--extra-index-url', 'https://pypi.nvidia.com/nvtorch_oot_nightly', 'torch', 'torchvision', 'torchaudio') (T 'torchhint')
-  } elseif ($nvidia) {
-    Run (T 'torch') $vpy @('-m', 'pip', 'install', 'torch', 'torchvision', 'torchaudio', '--index-url', 'https://download.pytorch.org/whl/cu128') (T 'torchhint')
-  } else {
-    Run (T 'torch') $vpy @('-m', 'pip', 'install', 'torch', 'torchvision', 'torchaudio') (T 'torchhint')
-  }
-} else { Ok ("PyTorch   " + (T 'already')) }
-$tinfo = ([string](& $vpy -c "import torch;print(torch.__version__+'|'+(torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))")).Trim().Split('|')
-if ($tinfo[1]) { Ok ((T 'gpuok') + "   " + $tinfo[1]) } else { Warn ("PyTorch " + $tinfo[0] + "   " + (T 'nogpuacc')) }
+if ($ChatOnly) {
+  Info 'Chat only: skipping PyTorch and ComfyUI.'
+  Run (T 'deps') $vpy @('-m', 'pip', 'install', '-r', (Join-Path $Root 'requirements.txt'))
+} else {
+  $hasTorch = (& $vpy -c "import importlib.util;print(importlib.util.find_spec('torch') is not None)") -eq 'True'
+  if (-not $hasTorch) {
+    if ($nvidia -and $arch -eq 'arm64') {
+      Run (T 'torch') $vpy @('-m', 'pip', 'install', '--pre', '--only-binary=:all:', '--extra-index-url', 'https://pypi.nvidia.com/nvtorch_oot_nightly', 'torch', 'torchvision', 'torchaudio') (T 'torchhint')
+    } elseif ($nvidia) {
+      Run (T 'torch') $vpy @('-m', 'pip', 'install', 'torch', 'torchvision', 'torchaudio', '--index-url', 'https://download.pytorch.org/whl/cu128') (T 'torchhint')
+    } else {
+      Run (T 'torch') $vpy @('-m', 'pip', 'install', 'torch', 'torchvision', 'torchaudio') (T 'torchhint')
+    }
+  } else { Ok ("PyTorch   " + (T 'already')) }
+  $tinfo = ([string](& $vpy -c "import torch;print(torch.__version__+'|'+(torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))")).Trim().Split('|')
+  if ($tinfo[1]) { Ok ((T 'gpuok') + "   " + $tinfo[1]) } else { Warn ("PyTorch " + $tinfo[0] + "   " + (T 'nogpuacc')) }
 
-$comfy = Join-Path $Runtime 'ComfyUI'
-function GetRepo([string]$label, [string]$url, [string]$dest, [string]$branch) {
-  if (Test-Path $dest) { Ok ($label + "   " + (T 'already')); return }
-  if (Get-Command git -ErrorAction SilentlyContinue) { Run $label 'git' @('clone', '--depth', '1', $url, $dest); return }
-  $zip = Join-Path $env:TEMP ((Split-Path $dest -Leaf) + '.zip')
-  Fetch $label "$url/archive/refs/heads/$branch.zip" $zip
-  $tmp = Join-Path $env:TEMP ('x_' + (Split-Path $dest -Leaf))
-  if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
-  Expand-Archive $zip $tmp -Force
-  Move-Item (Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName $dest
+  $comfy = Join-Path $Runtime 'ComfyUI'
+  function GetRepo([string]$label, [string]$url, [string]$dest, [string]$revision) {
+    if (Test-Path $dest) { Ok ($label + "   " + (T 'already')); return }
+    $parent = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($dest)).FullName
+    $tmp = Join-Path $parent ('sparky-stage-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($tmp)
+    try {
+      if (Get-Command git -ErrorAction SilentlyContinue) {
+        $stage = Join-Path $tmp 'repo'
+        Run $label 'git' @('init', '-q', $stage)
+        Run $label 'git' @('-C', $stage, 'remote', 'add', 'origin', $url)
+        Run $label 'git' @('-C', $stage, 'fetch', '--depth=1', 'origin', $revision)
+        Run $label 'git' @('-C', $stage, 'checkout', '-q', '--detach', $revision)
+      } else {
+        $stage = Get-SourceArchive "$url/archive/$revision.zip" (Join-Path $tmp 'extract')
+      }
+      [IO.Directory]::Move($stage, $dest)
+    } finally {
+      if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($tmp)) -eq $parent) {
+        Remove-Item -LiteralPath $tmp -Recurse -Force
+      }
+    }
+  }
+  GetRepo (T 'comfy') 'https://github.com/Comfy-Org/ComfyUI' $comfy '08ff3c11b3a85eb07c2c06f21cb378ac2e086840'
+  GetRepo (T 'ipa') 'https://github.com/cubiq/ComfyUI_IPAdapter_plus' (Join-Path $comfy 'custom_nodes\ComfyUI_IPAdapter_plus') 'a0f451a5113cf9becb0847b92884cb10cbdec0ef'
+  Run (T 'deps') $vpy @('-m', 'pip', 'install', '-r', (Join-Path $comfy 'requirements.txt'), '-r', (Join-Path $Root 'requirements.txt'))
 }
-GetRepo (T 'comfy') 'https://github.com/comfyanonymous/ComfyUI' $comfy 'master'
-GetRepo (T 'ipa') 'https://github.com/cubiq/ComfyUI_IPAdapter_plus' (Join-Path $comfy 'custom_nodes\ComfyUI_IPAdapter_plus') 'main'
-Run (T 'deps') $vpy @('-m', 'pip', 'install', '-r', (Join-Path $comfy 'requirements.txt'), '-r', (Join-Path $Root 'requirements.txt'))
 
 # ------------------------------------------------------------------ 5. llama.cpp
 Step (T 's5')
 $llama = Join-Path $Runtime 'llama'
 if (-not (Test-Path (Join-Path $llama 'llama-server.exe'))) {
-  $rels = Invoke-RestMethod 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15' -Headers @{ 'User-Agent' = 'sparky' }
+  $release = Invoke-RestMethod 'https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b11382' -Headers @{ 'User-Agent' = 'sparky' }
   # CUDA 13 needs a recent NVIDIA driver (>= 580); otherwise CUDA 12.4 (x64); without NVIDIA: CPU build
   $want = @()
   if ($nvidia -and $nvidia.driver -ge 580) { $want += "bin-win-cuda-13\.[\d.]+-$arch\.zip$" }
@@ -339,21 +363,22 @@ if (-not (Test-Path (Join-Path $llama 'llama-server.exe'))) {
   $want += "bin-win-cpu-$arch\.zip$"
   $pick = $null
   foreach ($pat in $want) {
-    foreach ($r in $rels) {
-      $a = $r.assets | Where-Object { $_.name -match "^llama-.*$pat" } | Select-Object -First 1
-      if ($a) { $pick = @{ rel = $r; asset = $a }; break }
-    }
-    if ($pick) { break }
+    $a = $release.assets | Where-Object { $_.name -match "^llama-.*$pat" -and $_.digest -match '^sha256:[a-f0-9]{64}$' } | Select-Object -First 1
+    if ($a) { $pick = @{ rel = $release; asset = $a }; break }
   }
   if (-not $pick) { Fail "llama.cpp: no build for Windows $arch" }
   $zip = Join-Path $env:TEMP 'llama.zip'
-  Fetch ("llama.cpp " + $pick.rel.tag_name) $pick.asset.browser_download_url $zip $pick.asset.size
+  Fetch ("llama.cpp " + $pick.rel.tag_name) $pick.asset.browser_download_url $zip $pick.asset.size $pick.asset.digest.Substring(7)
   New-Item -ItemType Directory -Force $llama | Out-Null
   Expand-Archive $zip $llama -Force
   if ($pick.asset.name -match 'cuda-([\d.]+)-') {   # CUDA runtime libraries ship separately
     $cv = $Matches[1]
     $rt = $pick.rel.assets | Where-Object { $_.name -eq "cudart-llama-bin-win-cuda-$cv-$arch.zip" } | Select-Object -First 1
-    if ($rt) { Fetch ("CUDA runtime " + $cv) $rt.browser_download_url $zip $rt.size; Expand-Archive $zip $llama -Force }
+    if ($rt) {
+      if ($rt.digest -notmatch '^sha256:[a-f0-9]{64}$') { Fail 'Missing CUDA archive SHA-256.' }
+      Fetch ("CUDA runtime " + $cv) $rt.browser_download_url $zip $rt.size $rt.digest.Substring(7)
+      Expand-Archive $zip $llama -Force
+    }
   }
   $exe = Get-ChildItem $llama -Recurse -Filter 'llama-server.exe' | Select-Object -First 1
   if ($exe -and $exe.DirectoryName -ne $llama) { Get-ChildItem $exe.DirectoryName | Move-Item -Destination $llama -Force }
@@ -363,15 +388,16 @@ if (-not (Test-Path (Join-Path $llama 'llama-server.exe'))) {
 # Node.js (portable): runs and tests the JavaScript projects the assistant builds
 $nodeDir = Join-Path $Runtime 'node'
 if (-not (Test-Path (Join-Path $nodeDir 'node.exe'))) {
-  $idx = Invoke-RestMethod 'https://nodejs.org/dist/index.json'
-  $lts = $idx | Where-Object { $_.lts -and $_.files -contains "win-$arch-zip" } | Select-Object -First 1
-  if ($lts) {
-    $zip = Join-Path $env:TEMP 'node.zip'
-    Fetch ("Node.js " + $lts.version) "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-win-$arch.zip" $zip
-    Expand-Archive $zip $Runtime -Force
-    $nd = Get-ChildItem $Runtime -Directory -Filter 'node-v*' | Select-Object -First 1
-    if ($nd) { Move-Item $nd.FullName $nodeDir }
-  }
+  $version = 'v24.21.0'
+  $hashes = @{ arm64 = '8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921';
+               x64 = '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541' }
+  if (-not $hashes[$arch]) { Fail ("Node.js: unsupported platform " + $arch) }
+  $zip = Join-Path $env:TEMP ('sparky-node-' + [guid]::NewGuid().ToString('N') + '.zip')
+  try {
+    Fetch ("Node.js " + $version) "https://nodejs.org/dist/$version/node-$version-win-$arch.zip" $zip 0 $hashes[$arch]
+    Expand-Archive -LiteralPath $zip -DestinationPath $Runtime -Force
+    [IO.Directory]::Move((Join-Path $Runtime "node-$version-win-$arch"), $nodeDir)
+  } finally { if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force } }
 } else { Ok ("Node.js   " + (T 'already')) }
 
 # ------------------------------------------------------------------ 6. scan + models
@@ -392,7 +418,8 @@ $rec = $scan.recommended
 $lines = @('')
 $sum = 0
 $labels = @{ llm = (T 'assistant'); image = (T 'images'); voice = (T 'voice') }
-foreach ($k in @('llm', 'image', 'voice')) {
+$modelKinds = if ($ChatOnly) { @('llm') } else { @('llm', 'image', 'voice') }
+foreach ($k in $modelKinds) {
   $m = $rec.$k
   if ($m) {
     $lines += ("{0,-11}{1,-31}{2,6:N1} {3}" -f $labels[$k], $m.label, $m.size_gb, $gbu)
@@ -406,23 +433,26 @@ Write-Host ("    " + (T 'recommended')) -ForegroundColor White
 Box $lines 'DarkCyan'
 if ($Models -and -not $NoModels -and $sum -gt 0) {
   Write-Host ""
-  & $vpy app\models_cli.py --recommended "--lang=$script:L"
+  $ids = @($modelKinds | ForEach-Object { if ($rec.$_) { $rec.$_.id } })
+  & $vpy app\models_cli.py @ids "--lang=$script:L"
 } else { Info (T 'later') }
 Pop-Location
 
 # ------------------------------------------------------------------ 7. shortcuts
 Step (T 's7')
-$ws = New-Object -ComObject WScript.Shell
-foreach ($folder in @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))) {
-  $lnk = $ws.CreateShortcut((Join-Path $folder 'Sparky.lnk'))
-  $lnk.TargetPath = 'powershell.exe'
-  $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\start.ps1`""
-  $lnk.WorkingDirectory = $Root
-  $lnk.IconLocation = "$Root\app\logo.ico"
-  $lnk.Description = 'Sparky - private AI assistant, 100% local'
-  $lnk.Save()
+if (-not $NoShortcuts) {
+  $ws = New-Object -ComObject WScript.Shell
+  foreach ($folder in @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))) {
+    $lnk = $ws.CreateShortcut((Join-Path $folder 'Sparky.lnk'))
+    $lnk.TargetPath = 'powershell.exe'
+    $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\start.ps1`""
+    $lnk.WorkingDirectory = $Root
+    $lnk.IconLocation = "$Root\app\logo.ico"
+    $lnk.Description = 'Sparky - private AI assistant, 100% local'
+    $lnk.Save()
+  }
+  Ok (T 'shortcut')
 }
-Ok (T 'shortcut')
 
 # ------------------------------------------------------------------ done
 Write-Host ""

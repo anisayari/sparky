@@ -13,6 +13,7 @@ from PIL import Image
 
 import config
 import harness
+import turn_runtime
 
 DIR = os.path.join(config.DATA, "studio")
 INDEX = os.path.join(DIR, "index.json")
@@ -25,6 +26,7 @@ jobs = []          # [{id, mode, prompt, ..., state: queued|running|done|error, 
 _lock = threading.Lock()
 _wake = threading.Event()
 _thread = None
+_running = {}
 hooks = {"before_video": lambda m: None, "after_queue": lambda: None}  # set by server.py (pause / resume the assistant)
 
 
@@ -210,16 +212,7 @@ def build_wan(m, prompt, seed, aspect="16:9", seconds=5, image=None, fps=24):
 # ---------------------------------------------------------------- generation
 def _comfy_outputs(graph):
     """Runs a graph; returns the paths of its saved files (images or videos)."""
-    pid = harness.http_json(harness.COMFY + "/prompt", {"prompt": graph})["prompt_id"]
-    while True:
-        time.sleep(1)
-        h = harness.http_json(f"{harness.COMFY}/history/{pid}")
-        if pid in h:
-            e = h[pid]
-            break
-    if e["status"]["status_str"] != "success":
-        errs = [x[1].get("exception_message", "") for x in e["status"].get("messages", []) if x[0] == "execution_error"]
-        raise RuntimeError("ComfyUI : " + (errs[0].strip() if errs else "échec"))
+    e = harness.comfy_result(graph, max_seconds=7200)
     files = [f for o in e["outputs"].values() for k in ("images", "videos", "gifs") for f in o.get(k, [])]
     return [os.path.join(harness.COMFY_OUT, f.get("subfolder", ""), f["filename"]) for f in files if f.get("type", "output") == "output"]
 
@@ -277,6 +270,7 @@ def _enhance_job(j):
         return
     if j.get("enhancing"):  # already being written by the submit thread
         while "final_prompt" not in j and j.get("enhancing"):
+            turn_runtime.check()
             time.sleep(0.3)
         return
     j["enhancing"] = True
@@ -295,6 +289,7 @@ def _run(job):
         for j in [job] + [j for j in jobs if j["state"] == "queued" and j["mode"] == "video"]:
             _enhance_job(j)
     _enhance_job(job)
+    turn_runtime.check()
     prompt = job.get("final_prompt") or job["prompt"]
     src =source_image(job.get("source")) if job.get("source") else None
     item = {"id": mid, "prompt": job["prompt"], "final_prompt": prompt, "created": time.time(), "aspect": job["aspect"],
@@ -344,22 +339,30 @@ def _worker():
     while True:
         _wake.wait(5)
         _wake.clear()
+        had_video = False
         while True:
             with _lock:
                 job = next((j for j in jobs if j["state"] == "queued"), None)
                 if job:
                     job.update(state="running", started=time.time())
+                    token = _running[job["id"]] = threading.Event()
             if not job:
                 break
             job["est"] = est_seconds(job)
+            turn_runtime.local.token = token
+            had_video = had_video or job["mode"] == "video"
             try:
                 job["result"] = _run(job)
                 job["state"] = "done"
             except Exception as e:
                 job.update(state="error", error=str(e))
                 print("studio:", e)
+            finally:
+                turn_runtime.local.token = None
+                with _lock:
+                    _running.pop(job["id"], None)
             job["ended"] = time.time()
-        if any(j["mode"] != "image" and j.get("ended", 0) > time.time() - 30 for j in jobs):
+        if had_video:
             try:
                 hooks["after_queue"]()
             except Exception as e:
@@ -380,15 +383,30 @@ def submit(mode, prompt, aspect="16:9", seconds=5, source=None, enhance_prompt=T
            "seconds": max(2, min(MAX_SECONDS, int(seconds or 5))), "source": source, "enhance": bool(enhance_prompt),
            "state": "queued", "status": "", "created": time.time()}
     with _lock:
+        if len(jobs) >= 50:
+            old = next((j for j in jobs if j["state"] in ("done", "error")), None)
+            if old is None:
+                raise ValueError("La file du Studio est pleine.")
+            jobs.remove(old)
         jobs.append(job)
-        del jobs[:-50]
+        if _thread is None:
+            _thread = threading.Thread(target=_worker, daemon=True)
+            _thread.start()
     if job["enhance"]:
         threading.Thread(target=_enhance_job, args=(job,), daemon=True).start()
-    if _thread is None:
-        _thread = threading.Thread(target=_worker, daemon=True)
-        _thread.start()
     _wake.set()
     return {k: v for k, v in job.items() if k != "source"} | {"hasSource": bool(source)}
+
+
+def cancel(job_id):
+    with _lock:
+        if job_id in _running:
+            _running[job_id].set()
+            return True
+        job = next((j for j in jobs if j["id"] == job_id and j["state"] == "queued"), None)
+        if job:
+            job.update(state="error", error="Génération arrêtée.", ended=time.time())
+        return job is not None
 
 
 def status():

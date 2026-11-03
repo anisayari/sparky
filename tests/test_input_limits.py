@@ -73,7 +73,7 @@ def test_expansion_of_repeated_spreadsheet_values_is_bounded(monkeypatch):
     (".docx", "word/document.xml", b"<document>" + b"<" * 65536),
     (".xlsx", "xl/sharedStrings.xml", b"<sst>" + b"<si/>" * 10000),
     (".xlsx", "xl/worksheets/sheet1.xml", b"<sheet>" + b"<row/>" * 10000),
-])
+], ids=["word-malformed", "sheet-strings-malformed", "sheet-rows-malformed"])
 def test_malformed_xml_is_rejected(ext, part, xml):
     with pytest.raises(ValueError, match="XML Office mal formé"):
         attach._office(archive((part, xml)), ext)
@@ -130,9 +130,10 @@ def test_chat_and_rag_share_capacity_and_release_it(monkeypatch):
         assert started.wait(3)
         second = attach.add("file.txt", encoded)
         assert second["state"] == "error" and second["error"] == attach.READERS_BUSY
-        busy = wait(rag.add_document(cid, "third.txt", b"hello"))
-        assert busy["state"] == "error" and busy["error"] == attach.READERS_BUSY
+        queued = rag.add_document(cid, "third.txt", b"hello")
+        assert rag._read("SELECT doc_id FROM pending_documents WHERE doc_id=?", (queued,))
         release.set()
+        assert wait(queued)["state"] == "ready"
         assert gate.acquire(timeout=3)
         gate.release()
         assert attach.status(first["id"])["state"] == "ok"
