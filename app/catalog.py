@@ -4,7 +4,7 @@ on this machine (from the system scan) and indicators (quality, memory, vision, 
 The catalog only offers official or widely used models; "uncensored",
 "abliterated", NSFW, etc. variants are excluded, including from Hugging Face search.
 """
-import json, os, re, subprocess, threading, time, urllib.request
+import hashlib, json, os, re, shutil, subprocess, threading, time, urllib.request
 
 import config
 
@@ -244,13 +244,17 @@ def _install(mid):
 
         def one(repo, file, local, size):  # each file of the model downloads at the same time
             try:
-                if os.path.exists(local) and os.path.getsize(local) >= size:
+                # Image models share adapter files. Only one job may resume or publish each destination.
+                with _jobs_lock:
+                    file_lock = _file_locks.setdefault(os.path.normcase(os.path.abspath(local)), threading.Lock())
+                with file_lock:
+                    if size <= 0:
+                        raise ValueError("taille distante inconnue")
+                    if not os.path.exists(local) or os.path.getsize(local) != size:
+                        os.makedirs(os.path.dirname(local), exist_ok=True)
+                        fetch(HF.format(repo=repo, file=file), local + ".part", size, lambda n: prog.__setitem__(local, n))
+                        os.replace(local + ".part", local)
                     prog[local] = size
-                    return
-                os.makedirs(os.path.dirname(local), exist_ok=True)
-                fetch(HF.format(repo=repo, file=file), local + ".part", size, lambda n: prog.__setitem__(local, n))
-                os.replace(local + ".part", local)
-                prog[local] = size
             except Exception as e:
                 errors.append(f"{file} : {e}")
 
@@ -276,32 +280,77 @@ def _get_range(url, path, start, end, progress):
     """Appends bytes start..end (inclusive) of url to path; resumes from what path already holds."""
     for attempt in range(60):
         have = os.path.getsize(path) if os.path.exists(path) else 0
+        if have > end - start + 1:
+            # Older versions could leave the beginning of the next segment appended to this one.
+            with open(path, "r+b") as f:
+                f.truncate(end - start + 1)
+            return
         if start + have > end:
             return
         req = urllib.request.Request(url, headers={"Range": f"bytes={start + have}-{end}", "User-Agent": "Sparky"})
         try:
             with urllib.request.urlopen(req, timeout=60) as r, open(path, "ab") as f:
-                if r.status != 206:
-                    raise RuntimeError("le serveur ignore les plages d'octets")
-                while chunk := r.read(1 << 20):
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(?:\d+|\*)", r.headers.get("Content-Range", ""))
+                if r.status != 206 or not match or tuple(map(int, match.groups())) != (start + have, end):
+                    raise RuntimeError("plage d'octets incorrecte")
+                remaining = end - start + 1 - have
+                while remaining and (chunk := r.read(min(1 << 20, remaining))):
                     f.write(chunk)
+                    remaining -= len(chunk)
                     progress()
         except (OSError, urllib.error.URLError):
             time.sleep(min(30, 2 + attempt * 2))
-    if os.path.getsize(path) < end - start + 1:
+    if os.path.getsize(path) != end - start + 1:
         raise RuntimeError("téléchargement interrompu")
+
+
+def _valid_plan(plan, size):
+    if not isinstance(plan, list) or len(plan) != SEGMENTS:
+        return False
+    offset = 0
+    for segment in plan:
+        if not isinstance(segment, list) or len(segment) != 2 or not all(type(n) is int for n in segment):
+            return False
+        start, end = segment
+        if start != offset or end < start:
+            return False
+        offset = end + 1
+    return offset == size
 
 
 def fetch(url, part, size, report):
     """Downloads url into part (resumable). Big files: SEGMENTS parallel ranges, joined at the end;
     an existing single-stream part is kept as the first segment."""
+    if size <= 0:
+        raise ValueError("taille distante inconnue")
     if size < SEGMENT_MIN:
         _get_range(url, part, 0, size - 1, lambda: report(os.path.getsize(part)))
         return
     plan_file = part + ".segs.json"
     plan = config.read_json(plan_file)
+    if os.path.exists(plan_file) and not _valid_plan(plan, size):
+        plan = None
+        if os.path.exists(part):
+            os.remove(part)
     if not plan:
+        # A lost plan cannot authenticate the offsets of any old numbered shards.
+        for i in range(1, SEGMENTS):
+            orphan = f"{part}.{i}"
+            if os.path.exists(orphan):
+                os.remove(orphan)
         p0 = os.path.getsize(part) if os.path.exists(part) else 0
+        if p0 >= size:
+            if p0 != size:
+                # A previous version may already have discarded the plan for an oversized assembly.
+                with open(part, "wb"):
+                    pass
+                p0 = 0
+            else:
+                report(size)
+                return
+        if size - p0 < SEGMENTS:
+            _get_range(url, part, 0, size - 1, lambda: report(os.path.getsize(part)))
+            return
         step = (size - p0) // SEGMENTS
         cuts = [0] + [p0 + step * i for i in range(1, SEGMENTS)] + [size]
         plan = [[cuts[i], cuts[i + 1] - 1] for i in range(SEGMENTS)]
@@ -326,18 +375,23 @@ def fetch(url, part, size, report):
         t.join()
     if errs:
         raise errs[0]
-    with open(part, "ab") as out:  # join the segments after the first one
-        for p in paths[1:]:
+    joined = part + ".joining"
+    with open(joined, "wb") as out:
+        for p, (start, end) in zip(paths, plan):
+            if os.path.getsize(p) != end - start + 1:
+                raise RuntimeError("segment incomplet")
             with open(p, "rb") as f:
-                while chunk := f.read(16 << 20):
-                    out.write(chunk)
+                shutil.copyfileobj(f, out, length=4 << 20)
+    if os.path.getsize(joined) != size:
+        raise RuntimeError(f"taille incorrecte ({os.path.getsize(joined)} au lieu de {size})")
+    os.replace(joined, part)
     for p in paths[1:] + [plan_file]:
         os.remove(p)
-    if os.path.getsize(part) != size:
-        raise RuntimeError(f"taille incorrecte ({os.path.getsize(part)} au lieu de {size})")
 
 
 _jobs_lock = threading.Lock()
+_file_locks = {}
+_custom_lock = threading.Lock()
 
 
 def install(mid):
@@ -448,27 +502,42 @@ def hf_files(repo, kind):
 def hf_install(repo, path, kind, mmproj=None):
     if blocked(repo, path):
         raise RuntimeError("modèle non proposé dans Sparky")
+    with _custom_lock:
+        mid = _hf_model(repo, path, kind, mmproj)
+    install(mid)
+    return mid
+
+
+def _hf_model(repo, path, kind, mmproj):
+    # Match by origin, including entries saved with the old basename-only ID and destination.
+    for model in CATALOG:
+        files = model.get("files")
+        if model.get("custom") and model["kind"] == kind and files and files[0] and tuple(files[0][:2]) == (repo, path):
+            return model["id"]
     base = os.path.splitext(os.path.basename(path))[0]
-    mid = "hf:" + base
+    key = hashlib.sha256("\0".join((kind, repo, path)).encode()).hexdigest()
+    mid = "hf2:" + key
     if mid not in BY_ID:
         info = hf_files(repo, kind)
         f = next(x for x in info["files"] if x["path"] == path)
         if kind == "image":
             m = ckpt(mid, base, 3, repo, path, f["size_gb"], desc=repo)
+            m["ckpt"] = "hf-" + key + ".safetensors"
+            m["files"][0] = (repo, path, os.path.join(CM, "checkpoints", m["ckpt"]))
         else:
             total, active = _params(repo + " " + path)
             mm = mmproj if mmproj is not None else info["mmproj"]
             m = llm(mid, base, quality_guess(total), repo, path, None, f["size_gb"],
                     active_gb=f["size_gb"] * active / total if active and total else None,
                     think=any(t in repo.lower() for t in THINKERS), desc=repo)
+            m["files"][0] = (repo, path, os.path.join(M, "hf-" + key + ".gguf"))
             if mm:
-                m["files"][1] = (repo, mm, os.path.join(P, "mmproj-" + base + ".gguf"))
+                m["files"][1] = (repo, mm, os.path.join(P, "mmproj-" + key + ".gguf"))
             m["vision"] = bool(mm)
         m.update(custom=True, qualityGuess=True, repo=repo)
         CATALOG.append(m)
         BY_ID[mid] = m
         save_custom()
-    install(mid)
     return mid
 
 

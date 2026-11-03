@@ -198,10 +198,53 @@ Ok ("$os  $Mid  $arch  $Mid  $ram $gbu RAM")
 if ($nvidia) { Ok ("{0}  {1}  {2:N0} {3}" -f $nvidia.name, $Mid, ($nvidia.vram / 1024), $gbu) } else { Warn (T 'nogpu') }
 
 # ------------------------------------------------------------------ 2. Sparky files
+function Get-SourceArchive([string]$url, [string]$folder) {
+  $archive = $folder + '.zip'
+  Fetch (T 'dlcode') $url $archive
+  Expand-Archive -LiteralPath $archive -DestinationPath $folder
+  $roots = @(Get-ChildItem -Directory -LiteralPath $folder)
+  if ($roots.Count -ne 1) { throw 'Unexpected source archive layout.' }
+  return $roots[0].FullName
+}
+
+function Install-ZipSource([string]$folder) {
+  $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
+  $tmp = Join-Path $tempRoot ('sparky-zip-' + [guid]::NewGuid().ToString('N'))
+  [void][IO.Directory]::CreateDirectory($tmp)
+  try {
+    $next = Get-SourceArchive "$Repo/archive/refs/heads/main.zip" (Join-Path $tmp 'release')
+    $base = ''
+    if ((Test-Path -LiteralPath (Join-Path $folder 'app/server.py')) -and
+        -not (Test-Path -LiteralPath (Join-Path $folder '.sparky-zip-sources.json'))) {
+      # Older ZIPs have no manifest. Compare against their official release before touching local files.
+      $version = (Get-Content -LiteralPath (Join-Path $folder 'VERSION') -Raw).Trim()
+      if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Cannot identify the installed ZIP version.' }
+      # These releases predate both source manifests and Git tags. Pin their last release revisions.
+      $legacy = @{
+        '1.6.1'='7f8e9fca0077e1a6199e1495f5c0dfa7a3e0af94'; '1.6.0'='642e5a3f89c5149ba9b3595ecd5c299d0f9e4f0c'
+        '1.5.0'='c99067a336653c5df828c375ee2fe002ef7e5981'; '1.4.0'='0884388fdcde8a4da7865a3118ea1848e422c333'
+        '1.3.0'='36762f542e86fc7305adc6a06ea89070bf4c597b'; '1.2.0'='14ae66847f717c66f2a704d082df466bbed25795'
+        '1.1.2'='633323d31e193a232ad3b422a661bd515aace98e'; '1.1.1'='cfd9e80c0eb8fddb3a439554a44d26cc4b8e696a'
+        '1.1.0'='da8761525d9bc5e7c803789a9c89a3600c9510f9'
+      }
+      $ref = if ($legacy.ContainsKey($version)) { $legacy[$version] } else { "refs/tags/v$version" }
+      $base = Get-SourceArchive "$Repo/archive/$ref.zip" (Join-Path $tmp 'baseline')
+    }
+    & (Join-Path $next 'sync-zip.ps1') -Source $next -Destination $folder -Baseline $base
+  } finally {
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($tmp)) -eq $tempRoot) {
+      Remove-Item -LiteralPath $tmp -Recurse -Force
+    }
+  }
+}
+
 Step (T 's2')
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { '' }
-if ($here -and (Test-Path (Join-Path $here 'app\server.py'))) {
+if (-not $Dir -and $here -and (Test-Path (Join-Path $here 'app\server.py'))) {
   $Root = $here
+  if (-not (Test-Path -LiteralPath (Join-Path $Root '.git')) -and (Test-Path -LiteralPath (Join-Path $Root 'data/install.log'))) {
+    Install-ZipSource $Root
+  }
 } else {
   if (-not $Dir) {
     $Dir = Join-Path $env:LOCALAPPDATA 'Sparky'
@@ -213,18 +256,13 @@ if ($here -and (Test-Path (Join-Path $here 'app\server.py'))) {
     }
   }
   $hasGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
-  if (Test-Path (Join-Path $Dir 'app\server.py')) {
-    if ($hasGit -and (Test-Path (Join-Path $Dir '.git'))) { Run (T 'updated') 'git' @('-C', $Dir, 'pull', '--ff-only') }
-  } elseif ($hasGit) {
+  if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
+    if (-not $hasGit) { throw 'This is a Git installation. Install Git to update it safely.' }
+    Run (T 'updated') 'git' @('-C', $Dir, 'pull', '--ff-only')
+  } elseif ($hasGit -and -not (Test-Path -LiteralPath (Join-Path $Dir 'app\server.py'))) {
     Run (T 'dlcode') 'git' @('clone', '--depth', '1', "$Repo.git", $Dir)
   } else {
-    $zip = Join-Path $env:TEMP 'sparky.zip'
-    Fetch (T 'dlcode') "$Repo/archive/refs/heads/main.zip" $zip
-    $tmp = Join-Path $env:TEMP 'sparky_src'
-    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
-    Expand-Archive $zip $tmp -Force
-    New-Item -ItemType Directory -Force $Dir | Out-Null
-    Copy-Item (Join-Path (Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName '*') $Dir -Recurse -Force
+    Install-ZipSource $Dir
   }
   $Root = $Dir
 }

@@ -87,8 +87,8 @@ def add_document(collection_id, name, data, mime=""):
                  (collection_id, name, attach.kind_of(name, mime), len(data), time.time(), "indexing")).lastrowid
     if len(data) > attach.MAX_BYTES:
         _write("UPDATE documents SET state='error', error=? WHERE id=?", ("fichier trop gros (200 Mo max.)", did))
-    else:
-        threading.Thread(target=_ingest, args=(did, name, data, mime), daemon=True).start()
+    elif not attach.start_reader(_ingest, did, name, data, mime):
+        _write("UPDATE documents SET state='error', error=? WHERE id=?", (attach.READERS_BUSY, did))
     return did
 
 
@@ -195,11 +195,13 @@ def _terms(t):
 
 def search(query, collection_ids=None, k=6):
     """Best chunks: [{doc_id, doc, page, text, score, collection}], hybrid cosine + BM25, near-duplicates removed."""
-    sql = ("SELECT c.id, c.doc_id, c.page, c.text, c.vec, d.name AS doc, l.name AS collection FROM chunks c "
+    sql = ("SELECT c.id, c.doc_id, c.page, c.text, c.vec, d.name AS doc, l.name AS collection, d.collection_id FROM chunks c "
            "JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id WHERE d.state='ready'")
     args = []
-    if collection_ids:
+    if collection_ids is not None:
         ids = [int(i) for i in collection_ids]
+        if not ids:
+            return []
         sql += f" AND d.collection_id IN ({','.join('?' * len(ids))})"
         args = ids
     rows = [dict(r) for r in _read(sql, args)]
@@ -238,7 +240,7 @@ def search(query, collection_ids=None, k=6):
             continue  # same passage twice (overlap, duplicated file)
         seen.append(t)
         hits.append({"doc_id": r["doc_id"], "doc": r["doc"], "page": r["page"], "text": r["text"],
-                     "score": round(r["score"], 4), "collection": r["collection"]})
+                     "score": round(r["score"], 4), "collection": r["collection"], "collection_id": r["collection_id"]})
     return hits
 
 
@@ -246,7 +248,7 @@ def context_block(hits):
     """Numbered sources for the LLM, with the instruction to cite them as [1], [2]."""
     if not hits:
         return ""
-    src = "\n\n".join(f"[{i}] {h['doc']}" + (f" (p. {h['page']})" if h.get("page") else "") + f": {h['text']}"
+    src = "\n\n".join(f"[{h.get('source_number', i)}] {h['doc']}" + (f" (p. {h['page']})" if h.get("page") else "") + f": {h['text']}"
                       for i, h in enumerate(hits, 1))
     return ("Excerpts from the user's knowledge base:\n\n" + src +
             "\n\nUse these sources when they are relevant. Cite each fact you take from them with its number in square "

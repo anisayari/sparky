@@ -26,7 +26,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 ## ✨ What it does
 
 ### 💬 Chat
-- 🔒 **Like ChatGPT, offline** — history, plus 👻 **temporary chats** that are never saved.
+- 🔒 **Local chat history** — temporary chats keep their own transient files and support text and vision. Use a regular chat for image generation or editing, because the shared ComfyUI engine retains inputs and outputs.
 - ✏️ **Edit** any message, 🔁 **regenerate** or ➡️ **continue** an answer, and flip between versions (‹ 2/3 ›).
 - 🧠 **Adjustable thinking** — Off, Light, Normal or Deep, and see how the model reasoned.
 - 📝 **Rich answers** — tables, LaTeX formulas, Mermaid diagrams, task lists, syntax-highlighted code (all offline).
@@ -44,7 +44,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 🎬 **Studio: images & videos** — a gallery of everything you generated, with a Grok-Imagine-like prompt bar: **text → image**, **text → video**, **image → video** ("Animate"). Videos come **with synchronized sound** 🔊 (LTX-2.5), and your idea is expanded into a detailed prompt first.
 - 🖼️ **Images** — generate and edit by asking ("make it snow", "remove the bottle"); the agent checks its own result and retries.
 - 🧩 **Code & apps panel** — games, pages, tools and scripts written live next to the chat, with a **running preview**.
-- 🏗️ **Multi-file projects** — websites (`index.html` + `css/` + `js/`), Python or Node.js programs; the assistant makes the pictures, then Sparky **tests the project automatically** (headless browser, `npm install`, run) and the model **fixes the errors until it works**. ▶ Run anytime, download as ZIP.
+- 🏗️ **Multi-file projects** — build websites, Python or Node.js projects with generated assets. Sparky checks source syntax and local resource references, then sends errors back to the assistant for repair. Preview a website on the isolated origin, rerun the checks, or download the project as a ZIP. Native execution and package installation are disabled in the checker.
 
 ### 🎙️ Voice
 - 🎤 **Dictation, offline** — click the mic, talk, stop: Whisper writes it in the input box.
@@ -78,7 +78,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 | 🎬 **Studio** | media library of every image and video (Studio and chats) · text → image · text → video · image → video ("Animate") · 16:9, 9:16, 1:1, 4:3, 3:4 · 3 to 10 s · prompt enhancement · video player, download, reuse prompt · the local assistant pauses during a video and comes back after |
 | 🎞️ **Video models** | LTX-2.5 22B (video + sound, ~40 s for 4 s of video on an RTX Spark once loaded) · Wan 2.2 5B (lighter, no sound) |
 | 🖼️ **Images** | generate and edit by instruction (FLUX.2 Klein, Qwen-Image 2.1, SDXL) · paint a zone to edit · reuse a face, character, style or scene · the agent checks its result and retries |
-| 🧩 **Code & projects** | artifacts panel with live preview, code, versions, download · multi-file projects (web, Python, Node.js) · automatic test-and-fix loop (headless browser, Python, `npm install` / build / test) · ▶ Run · ZIP download · generated pictures inside projects |
+| 🧩 **Code & projects** | isolated web previews, versions and downloads · multi-file projects (web, Python, Node.js) · automatic static checks with repair feedback · ZIP export with generated assets |
 | 📝 **Markdown** | GFM tables · task lists · LaTeX (KaTeX) · Mermaid diagrams · syntax highlighting · citations · served locally (no CDN) |
 | 🎙️ **Voice** | offline dictation (Whisper large-v3 turbo / base) with live level bars · offline read-aloud (Piper voices: en, fr, de, es, it) |
 | 💻 **Computer mode** | list, read (PDF / Office), search, info, screenshot · write, mkdir, copy, move · Recycle Bin (never a permanent delete) · open files / apps / URLs · PowerShell commands (2 min timeout) · 5 security levels per chat · approval cards (once / always in this chat / deny) · system folders always protected |
@@ -167,7 +167,7 @@ The installer walks you through 7 simple steps:
 
 Sparky then opens at <http://127.0.0.1:7860> on its welcome screen: pick your language, see the system scan, use the models **already on your PC** in one click, or install the recommended ones (or any other from *See all models*). Nothing is downloaded without your click.
 
-Next times, double-click the shortcut (or `start.bat`). To stop everything: `stop.bat`.
+Next time, double-click the shortcut or `start.bat`. On Windows, `stop.bat` waits for this installation to exit. The server closes only the engines it started and their descendants. Engines started separately or by an older version can be closed in their original application.
 
 Installer options: `-Lang en|fr`, `-Dir <folder>`, `-Yes` (no questions), `-Models` (also download the recommended models from the terminal), `-NoLaunch`. For the one-line install, use the environment variables `SPARKY_LANG`, `SPARKY_DIR`, `SPARKY_YES`, `SPARKY_MODELS`, `SPARKY_NOLAUNCH`.
 
@@ -265,7 +265,9 @@ Sparky is 100% local by default. If you want, *Settings > Cloud models* lets you
 
 Everything runs on your machine: conversations, documents, images and models stay in the install folder (`data\`, `models\`). The only outgoing connections download the tools and models (GitHub, PyPI, Hugging Face, the Piper voices), search the model library, check for updates (the `VERSION` file on GitHub), and — only when you turn them on — search the web and read pages (*Web* chip of a chat, scheduled tasks), run MCP tools that reach the internet, or talk to a cloud provider.
 
-The local API only answers the Sparky page itself: requests from other websites (cross-site or DNS rebinding) are refused, and the projects the assistant writes run on their own origin (port 7861), so their code cannot drive Sparky. The OpenAI-compatible API (`/v1`) is off by default; when on, it requires its key and still only listens on `127.0.0.1`. Web reading refuses private and local addresses.
+The management API verifies that the local client belongs to the same OS account and checks the browser origin. Web previews use a separate port. The optional OpenAI-compatible API (`/v1`) requires its bearer key and listens on `127.0.0.1`. Public web requests connect to a validated public IP at each redirect.
+
+After upgrading from 1.6.1 or earlier, select the assistant, document collections, web access and Computer permissions again for existing conversations. Older session files do not record whether these settings were chosen locally or imported from someone else's file.
 
 ## 💻 Computer mode and security
 
@@ -332,7 +334,7 @@ app/
   localscan.py  finds the models already on the PC (LM Studio, Ollama, Hugging Face...)
   updater.py    version check and one-click update (git pull)
   cloud.py      optional cloud providers (OpenRouter, Claude, OpenAI-compatible...)
-  checker.py    automatic project tests (headless browser, Python, Node.js)
+  checker.py    static syntax and local resource checks for generated projects
   stt.py        offline voice dictation (Whisper)
   tts.py        offline read-aloud (Piper voices through onnxruntime + espeak-ng)
   computer.py   computer mode: file / app / command tools, security levels, protected folders

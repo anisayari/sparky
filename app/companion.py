@@ -27,6 +27,9 @@ CONTEXT_MSGS = 24
 DUP, SAME = 0.94, 0.905
 state = {"busy": False, "last_ops": None, "last_activity": 0.0, "reflecting": False}
 _lock = threading.Lock()
+_memory_lock = threading.RLock()
+_memory_epoch = 0
+_last_forget_epoch = 0
 
 
 def profile():
@@ -34,8 +37,39 @@ def profile():
     p.setdefault("name", "Sparky")
     p.setdefault("persona", "warm")
     p.setdefault("custom", "")
-    p.setdefault("memory_on", True)
+    p["memory_on"] = p.get("memory_on", True) is True
     return p
+
+
+def update_profile(changes):
+    global _memory_epoch
+    with _memory_lock:
+        p = profile()
+        if "memory_on" in changes and type(changes["memory_on"]) is not bool:
+            raise ValueError("memory_on must be true or false")
+        if changes.get("memory_on", p["memory_on"]) != p["memory_on"]:
+            if changes["memory_on"]:
+                recent = S.messages(1)
+                p["memory_after"] = recent[-1]["id"] if recent else 0
+            _memory_epoch += 1
+        p.update({k: changes[k] for k in ("name", "persona", "custom", "memory_on") if k in changes})
+        S.set("profile", p)
+
+
+def forget_all():
+    global _memory_epoch, _last_forget_epoch
+    with _memory_lock:
+        enabled = profile()["memory_on"]
+        _memory_epoch += 1
+        _last_forget_epoch = _memory_epoch
+        S.forget_all()
+        if not enabled:
+            S.set("profile", {"memory_on": False})
+        state["last_ops"] = None
+
+
+def _memory_allowed(epoch):
+    return epoch == _memory_epoch and profile()["memory_on"] is True
 
 
 def bond():
@@ -56,13 +90,25 @@ def _gain(points):
     S.set("bond", b)
 
 
-def llm(messages, json_mode=False, max_tokens=900, temperature=0.7, stream=None):
+def _dispatch(epoch, messages, **options):
+    # Check after collecting messages and after any UI callbacks. Revocation can happen in either.
+    with _memory_lock:
+        if epoch != _memory_epoch:
+            return None
+    return llm(messages, epoch=epoch, **options)
+
+
+def llm(messages, json_mode=False, max_tokens=900, temperature=0.7, stream=None, epoch=None):
     body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature,
             "chat_template_kwargs": {"enable_thinking": False}}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     out, last = "", 0.0
-    with harness.busy("llm"), contextlib.closing(harness.chat_deltas(body)) as deltas:  # local or cloud model
+    with _memory_lock:
+        if epoch is not None and epoch != _memory_epoch:
+            return None
+        response = harness.chat_deltas(body)  # admission to the currently selected local or cloud transport
+    with harness.busy("llm"), contextlib.closing(response) as deltas:
         for piece, _ in deltas:
             out += piece
             if stream and time.time() - last > 0.05:
@@ -82,13 +128,13 @@ def system_prompt(query):
     p, b = profile(), bond()
     title, traits, _ = PERSONAS.get(p["persona"], PERSONAS["warm"])
     mems = S.search(query, k=14) if p["memory_on"] else []
-    style = S.get("style", {})
-    summary = S.get("summary", "")
-    checkin = S.get("checkin", "")
+    style = S.get("style", {}) if p["memory_on"] else {}
+    summary = S.get("summary", "") if p["memory_on"] else ""
+    checkin = S.get("checkin", "") if p["memory_on"] else ""
     days = max(1, int((time.time() - b.get("first", time.time())) / 86400) + 1)
     lines = [f'You are {p["name"]}, the user\'s personal AI companion. Personality: {traits}.'
              + (f' Extra personality notes from the user: {p["custom"]}.' if p["custom"] else ""),
-             "You run 100% locally on the user's own PC. You remember them across conversations and get to know them over time.",
+             ("You can use the memories the user enabled." if p["memory_on"] else "Long-term memory is off."),
              f'Relationship stage: "{b["label"]}" ({b.get("chats", 0)} exchanges over {days} day(s)). The closer you are, the more '
              "personal, relaxed and familiar you can be (inside jokes, references to past talks). Stay a friend: never clingy, "
              "never romantic or sexual, never guilt-tripping.",
@@ -126,19 +172,29 @@ def chat(text, emit):
     with _lock:
         state["busy"] = True
         try:
-            S.add_message("user", text)
-            sysp, mems = system_prompt(text)
+            with _memory_lock:
+                epoch = _memory_epoch
+                S.add_message("user", text)
+                sysp, mems = system_prompt(text)
             emit({"type": "context", "memories": mems})
-            reply = llm([{"role": "system", "content": sysp}] + history(), max_tokens=900,
-                        stream=lambda t: emit({"type": "token", "text": t}))
-            mid = S.add_message("assistant", reply)
+            reply = _dispatch(epoch, [{"role": "system", "content": sysp}] + history(), max_tokens=900,
+                              stream=lambda t: emit({"type": "token", "text": t}))
+            if reply is None:
+                emit({"type": "error", "text": "Les paramètres de mémoire ont changé. Renvoyez votre message."})
+                return ""
+            with _memory_lock:
+                if epoch < _last_forget_epoch:
+                    return ""
+                mid = S.add_message("assistant", reply)
+                if not _memory_allowed(epoch):
+                    S.set("reflected_upto", mid)
             _gain(1)
             emit({"type": "reply", "text": reply, "id": mid, "bond": bond()})
         finally:
             state["busy"] = False
             state["last_activity"] = time.time()
-    if profile()["memory_on"]:
-        threading.Thread(target=learn, args=(text, reply), daemon=True).start()
+    if _memory_allowed(epoch):
+        threading.Thread(target=learn, args=(text, reply, epoch), daemon=True).start()
     return reply
 
 
@@ -158,68 +214,82 @@ Return ONLY JSON: {"add":[{"text":"...","category":"identity|preference|project|
 "update":[{"id":0,"text":"...","importance":3}],"delete":[0],"style":{},"mood":"one word or empty"}"""
 
 
-def learn(user_text, reply):
+def learn(user_text, reply, epoch=None):
     try:
-        related = S.search(user_text, k=10)
-        mem_txt = "\n".join(f'[{m["id"]}] ({m["category"]}) {m["text"]}' for m in related) or "(none)"
-        sysp = EXTRACT.replace("{today}", datetime.now().strftime("%A %d %B %Y")).replace("{lang}", user_lang())
-        ops = llm([{"role": "system", "content": sysp},
-                   {"role": "user", "content": f"EXISTING RELATED MEMORIES:\n{mem_txt}\n\nCURRENT STYLE PROFILE: "
-                    f"{json.dumps(S.get('style', {}), ensure_ascii=False)}\n\nLATEST EXCHANGE\nUser: {user_text}\nAssistant: {reply}"}],
-                  json_mode=True, max_tokens=700, temperature=0.2)
-        done = {"add": [], "update": [], "delete": [], "style": {}, "mood": ops.get("mood") or ""}
-        mems = {m["id"]: m for m in S.memories()}
-
-        uw, rw = memory.words(user_text), memory.words(reply)
-
-        def from_user(text):
-            """Provenance check: a new memory must rest on the user's words, not only on the assistant's reply."""
-            mw = memory.words(text) - memory.words(profile()["name"])
-            in_user, in_reply = len(mw & uw), len(mw & rw - uw)
-            return in_user >= 1 and in_user >= in_reply
-
-        def add(text, category, importance):
-            if not from_user(text):
+        with _memory_lock:
+            epoch = _memory_epoch if epoch is None else epoch
+            if not _memory_allowed(epoch):
                 return
-            near = S.nearest(text)
-            if near and near[1] >= DUP:  # already known (same fact, other words): nothing to add
-                return
-            i = S.add_memory(text, category, importance)
-            if i:
-                done["add"].append({"id": i, "text": text})
-
-        for a in ops.get("add") or []:
-            if isinstance(a, dict) and a.get("text"):
-                add(a["text"], a.get("category", "other"), int(a.get("importance") or 3))
-        for u in ops.get("update") or []:
-            if not (isinstance(u, dict) and u.get("id") in mems and u.get("text")):
-                continue
-            old, new = mems[u["id"]]["text"], u["text"].strip()
-            if new == old:
-                continue
-            # guard-rails: an update must stay ONE fact about the SAME thing, otherwise the old memory is kept
-            if len(new) > 2 * len(old) + 80 or new.count(". ") >= 2:
-                continue  # several facts merged into one blob: refused
-            if S.similarity(old, new) < SAME:
-                add(new, mems[u["id"]]["category"], int(u.get("importance") or mems[u["id"]]["importance"]))
-                continue  # different fact: stored as a new memory instead of overwriting
-            S.update_memory(u["id"], new, importance=u.get("importance"))
-            done["update"].append({"id": u["id"], "text": new})
-        known = set(mems)
-        for d in ops.get("delete") or []:
-            if d in known:
-                S.delete_memory(d)
-                done["delete"].append(d)
-        if isinstance(ops.get("style"), dict) and ops["style"]:
-            st = S.get("style", {})
-            st.update({k: str(v) for k, v in ops["style"].items() if v})
-            S.set("style", st)
-            done["style"] = ops["style"]
-        if done["mood"]:
-            S.set("mood", done["mood"])
-        state["last_ops"] = done | {"ts": time.time()}
+            related = S.search(user_text, k=10)
+            mem_txt = "\n".join(f'[{m["id"]}] ({m["category"]}) {m["text"]}' for m in related) or "(none)"
+            sysp = EXTRACT.replace("{today}", datetime.now().strftime("%A %d %B %Y")).replace("{lang}", user_lang())
+            messages = [{"role": "system", "content": sysp},
+                       {"role": "user", "content": f"EXISTING RELATED MEMORIES:\n{mem_txt}\n\nCURRENT STYLE PROFILE: "
+                        f"{json.dumps(S.get('style', {}), ensure_ascii=False)}\n\nLATEST EXCHANGE\nUser: {user_text}\nAssistant: {reply}"}]
+        # The call is already admitted. A later disable or forget invalidates its result.
+        ops = _dispatch(epoch, messages, json_mode=True, max_tokens=700, temperature=0.2)
+        with _memory_lock:
+            if ops is not None and _memory_allowed(epoch):
+                _apply_learning(ops, user_text, reply)
     except Exception as e:
-        state["last_ops"] = {"error": str(e), "ts": time.time()}
+        with _memory_lock:
+            if _memory_allowed(epoch):
+                state["last_ops"] = {"error": str(e), "ts": time.time()}
+
+
+def _apply_learning(ops, user_text, reply):
+    done = {"add": [], "update": [], "delete": [], "style": {}, "mood": ops.get("mood") or ""}
+    mems = {m["id"]: m for m in S.memories()}
+
+    uw, rw = memory.words(user_text), memory.words(reply)
+
+    def from_user(text):
+        """Provenance check: a new memory must rest on the user's words, not only on the assistant's reply."""
+        mw = memory.words(text) - memory.words(profile()["name"])
+        in_user, in_reply = len(mw & uw), len(mw & rw - uw)
+        return in_user >= 1 and in_user >= in_reply
+
+    def add(text, category, importance):
+        if not from_user(text):
+            return
+        near = S.nearest(text)
+        if near and near[1] >= DUP:  # already known (same fact, other words): nothing to add
+            return
+        i = S.add_memory(text, category, importance)
+        if i:
+            done["add"].append({"id": i, "text": text})
+
+    for a in ops.get("add") or []:
+        if isinstance(a, dict) and a.get("text"):
+            add(a["text"], a.get("category", "other"), int(a.get("importance") or 3))
+    for u in ops.get("update") or []:
+        if not (isinstance(u, dict) and u.get("id") in mems and u.get("text")):
+            continue
+        old, new = mems[u["id"]]["text"], u["text"].strip()
+        if new == old:
+            continue
+        # guard-rails: an update must stay ONE fact about the SAME thing, otherwise the old memory is kept
+        if len(new) > 2 * len(old) + 80 or new.count(". ") >= 2:
+            continue  # several facts merged into one blob: refused
+        if S.similarity(old, new) < SAME:
+            add(new, mems[u["id"]]["category"], int(u.get("importance") or mems[u["id"]]["importance"]))
+            continue  # different fact: stored as a new memory instead of overwriting
+        S.update_memory(u["id"], new, importance=u.get("importance"))
+        done["update"].append({"id": u["id"], "text": new})
+    known = set(mems)
+    for d in ops.get("delete") or []:
+        if d in known:
+            S.delete_memory(d)
+            done["delete"].append(d)
+    if isinstance(ops.get("style"), dict) and ops["style"]:
+        st = S.get("style", {})
+        st.update({k: str(v) for k, v in ops["style"].items() if v})
+        S.set("style", st)
+        done["style"] = ops["style"]
+    if done["mood"]:
+        S.set("mood", done["mood"])
+    state["last_ops"] = done | {"ts": time.time()}
+
 
 
 REFLECT = """You are the reflective side of a personal AI companion named {name}. Between conversations you look back on what happened.
@@ -235,64 +305,84 @@ Given the recent messages, your previous summary and ALL current memories about 
 
 def reflect(force=False):
     """Background consolidation. Runs after a pause in the conversation (or on demand)."""
-    if state["reflecting"] or state["busy"]:
-        return False
-    since = S.get("reflected_upto", 0)
-    msgs = S.messages(80, after=since)
-    if not msgs or (len(msgs) < 4 and not force):
-        return False
-    state["reflecting"] = True
-    try:
+    with _memory_lock:
         p = profile()
+        if not p["memory_on"] or state["reflecting"] or state["busy"]:
+            return False
+        since = max(S.get("reflected_upto", 0), p.get("memory_after", 0))
+        msgs = S.messages(80, after=since)
+        if not msgs or (len(msgs) < 4 and not force):
+            return False
+        epoch = _memory_epoch
         mems = S.memories()
-        r = llm([{"role": "system", "content": REFLECT.format(name=p["name"], today=datetime.now().strftime("%A %d %B %Y"), lang=user_lang())},
+        messages = [{"role": "system", "content": REFLECT.format(name=p["name"], today=datetime.now().strftime("%A %d %B %Y"), lang=user_lang())},
                  {"role": "user", "content": "PREVIOUS SUMMARY: " + (S.get("summary", "") or "(none)")
                   + "\n\nMEMORIES:\n" + "\n".join(f'[{m["id"]}] {m["text"]}' for m in mems[:120])
-                  + "\n\nRECENT MESSAGES:\n" + "\n".join(f'{m["role"]}: {m["text"][:600]}' for m in msgs)}],
-                json_mode=True, max_tokens=1200, temperature=0.4)
-        known = {m["id"] for m in mems}
-        texts = {m["id"]: m["text"] for m in mems}
-        for g in r.get("merge") or []:
-            ids = [i for i in g.get("ids", []) if i in known]
-            # only merge memories that really talk about the same thing, into one fact
-            ids = [ids[0]] + [i for i in ids[1:] if S.similarity(texts[ids[0]], texts[i]) >= SAME] if ids else []
-            if len(ids) >= 2 and g.get("text") and g["text"].count(". ") < 2:
-                S.update_memory(ids[0], g["text"])
-                for i in ids[1:]:
-                    S.delete_memory(i)
-                    known.discard(i)
-        for i in r.get("delete") or []:
-            if i in known:
-                S.delete_memory(i)
-        if r.get("summary"):
-            S.set("summary", r["summary"])
-        if r.get("journal"):
-            S.add_journal(r["journal"])
-        S.set("checkin", r.get("checkin") or "")
-        S.set("reflected_upto", msgs[-1]["id"])
-        S.set("last_reflection", time.time())
-        return True
+                  + "\n\nRECENT MESSAGES:\n" + "\n".join(f'{m["role"]}: {m["text"][:600]}' for m in msgs)}]
+        state["reflecting"] = True
+    try:
+        r = _dispatch(epoch, messages, json_mode=True, max_tokens=1200, temperature=0.4)
+        with _memory_lock:
+            if r is None or not _memory_allowed(epoch):
+                return False
+            return _apply_reflection(r, mems, msgs)
     finally:
-        state["reflecting"] = False
+        with _memory_lock:
+            state["reflecting"] = False
+
+
+def _apply_reflection(r, mems, msgs):
+    known = {m["id"] for m in mems}
+    texts = {m["id"]: m["text"] for m in mems}
+    for g in r.get("merge") or []:
+        ids = [i for i in g.get("ids", []) if i in known]
+        # only merge memories that really talk about the same thing, into one fact
+        ids = [ids[0]] + [i for i in ids[1:] if S.similarity(texts[ids[0]], texts[i]) >= SAME] if ids else []
+        if len(ids) >= 2 and g.get("text") and g["text"].count(". ") < 2:
+            S.update_memory(ids[0], g["text"])
+            for i in ids[1:]:
+                S.delete_memory(i)
+                known.discard(i)
+    for i in r.get("delete") or []:
+        if i in known:
+            S.delete_memory(i)
+    if r.get("summary"):
+        S.set("summary", r["summary"])
+    if r.get("journal"):
+        S.add_journal(r["journal"])
+    S.set("checkin", r.get("checkin") or "")
+    S.set("reflected_upto", msgs[-1]["id"])
+    S.set("last_reflection", time.time())
+    return True
+
 
 
 def greeting(emit=None):
     """When the user comes back after a while, the companion opens the conversation (using what it knows)."""
-    last = S.messages(1)
-    if last and time.time() - last[-1]["ts"] < 3 * 3600:
-        return None
-    sysp, _ = system_prompt("greeting how are you news follow up")
+    with _memory_lock:
+        epoch = _memory_epoch
+        last = S.messages(1)
+        if last and time.time() - last[-1]["ts"] < 3 * 3600:
+            return None
+        sysp, _ = system_prompt("greeting how are you news follow up")
     first = not last
     ask = ("This is your very first conversation: introduce yourself in 2 short sentences (your name, that you run on their PC, "
            "remember what matters to them and get to know them over time) and ask their name. Use the user's interface language: {lang}."
            if first else "The user just came back after a while. Greet them warmly and personally in 1-2 short sentences, "
            "using what you know (and the follow-up topic if there is one). Write in {lang}.")
     lang = user_lang()
-    text = llm([{"role": "system", "content": sysp}, {"role": "user", "content": "[" + ask.format(lang=lang) + "]"}],
-               max_tokens=200, stream=(lambda t: emit({"type": "token", "text": t})) if emit else None)
-    S.add_message("assistant", text)
-    if not first:
-        S.set("checkin", "")
+    text = _dispatch(epoch, [{"role": "system", "content": sysp}, {"role": "user", "content": "[" + ask.format(lang=lang) + "]"}],
+                     max_tokens=200, stream=(lambda t: emit({"type": "token", "text": t})) if emit else None)
+    if text is None:
+        return None
+    with _memory_lock:
+        if epoch < _last_forget_epoch:
+            return None
+        mid = S.add_message("assistant", text)
+        if not _memory_allowed(epoch):
+            S.set("reflected_upto", mid)
+        elif not first:
+            S.set("checkin", "")
     return text
 
 
@@ -303,7 +393,9 @@ def idle_loop():
         try:
             if time.time() - state["last_activity"] > 90 and time.time() - S.get("last_reflection", 0) > 600:
                 reflect()
-            S.reindex()  # vectors for memories saved before the embedding model was there
+            with _memory_lock:
+                if profile()["memory_on"]:
+                    S.reindex()  # vectors for memories saved before the embedding model was there
         except Exception as e:
             print("companion reflect:", e)
 

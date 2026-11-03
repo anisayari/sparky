@@ -43,7 +43,7 @@ jobs:
       - name: Parse with Windows PowerShell 5.1 (what "irm | iex" runs on)
         shell: powershell
         run: |
-          foreach ($f in 'install.ps1', 'start.ps1', 'stop.ps1') {
+          foreach ($f in 'install.ps1', 'start.ps1', 'stop.ps1', 'sync-zip.ps1') {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
             if ($errors) { $errors | ForEach-Object { Write-Error "$f : $_" }; exit 1 }

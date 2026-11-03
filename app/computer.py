@@ -10,7 +10,7 @@ Levels (Session.config["computer"]):
 Whatever the level: system folders cannot be modified, deletion goes to the Recycle Bin (never permanent),
 commands time out, outputs are cut. File contents and command outputs are data for the model, not instructions.
 """
-import ctypes, fnmatch, os, shutil, subprocess, time
+import ctypes, fnmatch, os, shutil, subprocess, time, unicodedata
 
 import config
 
@@ -132,7 +132,10 @@ def t_read(path, start=0):
     p = resolve(path)
     ext = os.path.splitext(p)[1].lower()
     if ext in (".pdf", ".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"):
-        data = open(p, "rb").read()
+        with open(p, "rb") as f:
+            data = f.read(attach.MAX_BYTES + 1)
+        if len(data) > attach.MAX_BYTES:
+            raise ValueError("document trop volumineux")
         text = attach._pdf(data) if ext == ".pdf" else attach._office(data, ext)
         if isinstance(text, tuple):
             text = text[0]
@@ -329,20 +332,41 @@ def batch(fn, a, with_dst=True):
     return f"{len(ps) - errs}/{len(ps)} réussis\n" + "\n".join(lines)
 
 
-def t_run(command, cwd=None):
+def run_arguments(a):
+    """Freeze the exact PowerShell text and directory used for approval and execution."""
+    if set(a) - {"tool", "command", "cmd", "cwd"} or ("command" in a and "cmd" in a):
+        raise ValueError("champs contradictoires ou inconnus pour run")
+    command = a.get("command", a.get("cmd"))
     if isinstance(command, list):  # models sometimes send ["powershell", "Get-ChildItem", ...]
-        parts = [str(x) for x in command]
+        if any(not isinstance(part, str) for part in command):
+            raise ValueError("commande invalide")
+        parts = command
         if parts and parts[0].lower() in ("powershell", "powershell.exe", "pwsh", "cmd", "cmd.exe"):
             parts = parts[1:]
         command = " ".join(parts)
-    if not str(command or "").strip():
+    if not isinstance(command, str) or not command.strip():
         raise ValueError("commande vide")
+    command = command.replace("\r\n", "\n").replace("\r", "\n")
+    cwd = a.get("cwd")
+    if cwd is not None and not isinstance(cwd, str):
+        raise ValueError("dossier invalide")
     wd = resolve(cwd) if cwd else places()["home"]
+    if any(unicodedata.category(c) in ("Cc", "Cf") and c not in "\n\t" for c in command + wd) or "\n" in wd or "\t" in wd:
+        raise ValueError("caractère de contrôle non affichable")
+    return {"command": command, "cwd": wd}
+
+
+def run_summary(command, cwd):
+    return f"PowerShell · {cwd}\n{command}"
+
+
+def t_run(command, cwd):
     t0 = time.time()
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+        powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        r = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-Command",
                             "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + str(command)],
-                           cwd=wd, capture_output=True, timeout=CMD_TIMEOUT, creationflags=config.NOWIN)
+                            cwd=cwd, capture_output=True, timeout=CMD_TIMEOUT, creationflags=config.NOWIN)
         out = (r.stdout + (b"\n" + r.stderr if r.stderr else b"")).decode("utf-8", "replace").strip()
         code = r.returncode
     except subprocess.TimeoutExpired as e:
@@ -350,7 +374,7 @@ def t_run(command, cwd=None):
         code = -1
     if len(out) > MAX_OUT:
         out = out[:MAX_OUT // 2] + "\n[…]\n" + out[-MAX_OUT // 2:]
-    return f"code de sortie {code} · {time.time() - t0:.1f} s · dossier {wd}\n{out or '(aucune sortie)'}"
+    return f"code de sortie {code} · {time.time() - t0:.1f} s · dossier {cwd}\n{out or '(aucune sortie)'}"
 
 
 RUN = {"list": lambda a: t_list(a.get("path") or "~"), "read": lambda a: t_read(a.get("path"), a.get("start")),
@@ -358,21 +382,20 @@ RUN = {"list": lambda a: t_list(a.get("path") or "~"), "read": lambda a: t_read(
        "info": lambda a: t_info(a.get("path")), "disks": lambda a: t_disks(), "screenshot": lambda a: t_screenshot(),
        "write": lambda a: t_write(a.get("path"), a.get("content", "")), "mkdir": lambda a: t_mkdir(a.get("path")),
        "copy": lambda a: batch(t_copy, a), "move": lambda a: batch(t_move, a), "trash": lambda a: batch(t_trash, a, False), "open": lambda a: t_open(a.get("path") or a.get("target")),
-       "run": lambda a: t_run(a.get("command") or a.get("cmd"), a.get("cwd"))}
+       "run": lambda a: t_run(**run_arguments(a))}
 
 
 def summary(tool, a):
-    """One line for the approval card."""
-    if a.get("paths") and isinstance(a["paths"], list):
-        ps = [str(p) for p in a["paths"]]
-        head = f"{len(ps)} éléments" + (f" → {a.get('dst')}" if a.get("dst") else "")
-        return head + "\n" + "\n".join(ps[:30]) + ("\n…" if len(ps) > 30 else "")
-    if tool in ("copy", "move"):
-        return f"{a.get('src') or a.get('path')} → {a.get('dst')}"
-    if tool == "run" and isinstance(a.get("command"), list):
-        return " ".join(str(x) for x in a["command"])
+    """Describe the actual operation, including every selected source in a batch."""
     if tool == "run":
-        return str(a.get("command") or a.get("cmd") or "")
+        return run_summary(**run_arguments(a))
+    if tool in ("copy", "move", "trash"):
+        ps = [str(p) for p in _many(a)]
+        dest = f" → {a.get('dst')}" if tool in ("copy", "move") else ""
+        if len(ps) == 1 and not (a.get("paths") or a.get("files")):
+            return ps[0] + dest
+        head = f"{len(ps)} éléments" + dest
+        return head + "\n" + "\n".join(ps)
     if tool == "search":
         return f"{a.get('root') or a.get('path') or '~'} · {a.get('name') or '*'}" + (f" · « {a['text']} »" if a.get("text") else "")
     return str(a.get("path") or a.get("target") or "")

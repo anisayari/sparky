@@ -5,7 +5,7 @@ The assistant model, image model and settings are chosen in the UI (Settings).
 Generated projects are served on the next port (preview origin): they cannot reach the API.
 """
 import argparse, base64, io, json, os, re, shutil, subprocess, sys, threading, time, urllib.request
-import http.server, socketserver
+import http.server, socket, socketserver
 from urllib.parse import parse_qs, unquote, urlparse
 
 import psutil
@@ -16,9 +16,11 @@ import catalog
 import cloud
 import config
 import harness
+import local_access
 import localscan
 import mcp
 import openai_api
+import process_owner
 import rag
 import scheduler
 import studio
@@ -40,6 +42,7 @@ failed = set()          # models that just failed to load: not retried automatic
 # model switch in progress, tracked by the UI (spinner + steps)
 switch = {"kind": None, "id": None, "label": "", "phase": "idle", "steps": [], "t0": 0.0, "eta": 0, "error": ""}
 _switch_lock = threading.Lock()
+_engines = process_owner.Engines()
 
 
 # ---------------------------------------------------------------- engines (llama-server, ComfyUI)
@@ -59,35 +62,11 @@ def port_listening(port):
 
 
 def stop_llm():
-    """Stops llama-server (only it: another program may use the same port)."""
-    for c in psutil.net_connections("tcp"):
-        if c.laddr and c.laddr.port == config.LLM_PORT and c.status == psutil.CONN_LISTEN and c.pid:
-            try:
-                p = psutil.Process(c.pid)
-                if "llama" in p.name().lower():
-                    p.kill()
-            except psutil.Error:
-                pass
-    for _ in range(40):
-        if not port_listening(config.LLM_PORT):
-            return
-        time.sleep(0.25)
+    _engines.stop("llm")
 
 
 def stop_comfy():
-    """Stops ComfyUI (only the python process that listens on its port)."""
-    for c in psutil.net_connections("tcp"):
-        if c.laddr and c.laddr.port == config.COMFY_PORT and c.status == psutil.CONN_LISTEN and c.pid:
-            try:
-                p = psutil.Process(c.pid)
-                if "python" in p.name().lower():
-                    p.kill()
-            except psutil.Error:
-                pass
-    for _ in range(40):
-        if not port_listening(config.COMFY_PORT):
-            return
-        time.sleep(0.25)
+    _engines.stop("comfy")
 
 
 def restart_comfy():
@@ -103,17 +82,16 @@ def free_comfy_memory(timeout=10):
         pass
 
 
-def _spawn(cmd, log, **kw):
+def _spawn(role, cmd, log, **kw):
     os.makedirs(config.DATA, exist_ok=True)
-    with open(log, "w") as out:  # the child keeps its own handle
-        return subprocess.Popen(cmd, creationflags=NOWIN, stdout=out, stderr=subprocess.STDOUT, **kw)
+    return _engines.spawn(role, cmd, log, **kw)
 
 
 def start_comfy():
     """Starts ComfyUI (image generation) if it isn't already running."""
     if port_listening(config.COMFY_PORT) or not os.path.exists(os.path.join(config.COMFY_DIR, "main.py")):
         return
-    _spawn([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(config.COMFY_PORT)],
+    _spawn("comfy", [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(config.COMFY_PORT)],
            os.path.join(config.DATA, "comfy.log"), cwd=config.COMFY_DIR)
     print("ComfyUI en cours de demarrage")
 
@@ -141,13 +119,17 @@ def llm_ctx(m):
 
 
 def launch_llm(m):
+    if port_listening(config.LLM_PORT):
+        raise RuntimeError(f"Le port de l'assistant ({config.LLM_PORT}) est déjà utilisé.")
     if not os.path.exists(config.LLAMA_SERVER):
         raise RuntimeError("llama-server introuvable : " + config.LLAMA_SERVER + " (relance install.ps1)")
     args = catalog.llm_args(m)
     gpu = syscheck.current()["assess"]["mode"] != "cpu"
     ctx = llm_state["ctx"] = llm_ctx(m)
-    _spawn([config.LLAMA_SERVER, "-m", args[0], "--port", str(config.LLM_PORT), "-ngl", "99" if gpu else "0",
-            "-c", str(ctx), "--jinja", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", *args[1:]], LLM_LOG)
+    started = _spawn("llm", [config.LLAMA_SERVER, "-m", args[0], "--port", str(config.LLM_PORT), "-ngl", "99" if gpu else "0",
+                             "-c", str(ctx), "--jinja", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", *args[1:]], LLM_LOG)
+    if not started:
+        raise RuntimeError("Un assistant Sparky est déjà en cours de démarrage.")
     print("Assistant en cours de demarrage :", m["label"], f"(contexte {ctx})")
 
 
@@ -359,13 +341,6 @@ def metrics():
             "switch": {"phase": switch["phase"], "kind": switch["kind"], "label": switch["label"]}}
 
 
-def run_project(s, pid, p):
-    """Run button: same engine as the automatic tests (Python, Node.js with npm, website in a headless browser)."""
-    import checker
-    r = checker.check(s, pid, p, config.PREVIEW_PORT)
-    return {"code": r["code"], "output": r["output"] or "(aucune sortie)", "secs": r["secs"], "ok": r["ok"], "kind": r["kind"]}
-
-
 def wait_llm(emit):
     """The assistant is paused for a Studio video or reloading after it: wait (with a status) instead of failing."""
     t0 = time.time()
@@ -451,7 +426,7 @@ def update_settings(new):
         if isinstance(new.get(k), str):
             harness.SETTINGS[k] = new[k][:8000].strip()
     if "mcp_on" in new:
-        harness.SETTINGS["mcp_on"] = bool(new["mcp_on"])
+        mcp.set_enabled(bool(new["mcp_on"]))
     if "llm_ctx" in new:  # 0 = automatic; takes effect at the next (re)start of the assistant
         try:
             n = int(new["llm_ctx"] or 0)
@@ -464,6 +439,7 @@ def update_settings(new):
 # ---------------------------------------------------------------- HTTP API
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    preview = False
 
     def log_message(self, *a):
         pass
@@ -472,6 +448,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
+        if code >= 400:
+            self.close_connection = True
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -479,22 +457,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+        if code >= 400 and self.command == "POST":
+            # Deliver the rejection before closing a Windows socket with incoming bytes.
+            # Discard at most one buffer. It can never become a second request.
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+                self.connection.settimeout(0.1)
+                self.rfile.read1(65536)
+            except OSError:
+                pass
+
+    def end_headers(self):
+        if self.close_connection and not any(h.lower().startswith(b"connection:") for h in getattr(self, "_headers_buffer", ())):
+            self.send_header("Connection", "close")
+        super().end_headers()
+
+    def local_owner(self):
+        if not hasattr(self, "_owned_connection"):
+            self._owned_connection = local_access.same_account(self.connection)
+        return self._owned_connection
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        # Several valid POST handlers never consume the body. Close after the first response.
+        if self.command == "POST":
+            self.close_connection = True
+        port = self.server.server_address[1]
+        authorities = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
+        if port == 80:
+            authorities.update(("127.0.0.1", "localhost", "[::1]"))
+        hosts = self.headers.get_all("Host", [])
+        if len(hosts) != 1 or hosts[0].lower() not in authorities:
+            self.send(403, {"error": "invalid local authority"})
+            return False
+        lengths = self.headers.get_all("Content-Length", [])
+        if (self.headers.get_all("Transfer-Encoding") or len(lengths) > 1
+                or (lengths and (not re.fullmatch(r"[0-9]{1,10}", lengths[0])
+                                 or (self.command != "POST" and int(lengths[0]) != 0)))):
+            self.send(400, {"error": "invalid request framing"})
+            return False
+        return True
 
     def trusted(self):
-        """Only the Sparky page may drive the API: a foreign Host is a DNS-rebinding attempt, a foreign Origin
-        (another website, or a generated project on the preview port) is a cross-site request."""
-        if urlparse("//" + (self.headers.get("Host") or "")).hostname not in LOCAL_HOSTS:
+        """Management requests belong to the local account and browser origin."""
+        if not self.preview and self.path.startswith("/v1/"):  # authenticated independently by its bearer key
+            return True
+        if not self.local_owner():
             return False
-        if self.path.startswith("/v1/"):  # OpenAI-compatible API: protected by its bearer key (openai_api.py)
-            return True
-        if self.command != "POST":
-            return True
+        if self.preview:
+            return self.command == "GET"
         origin = self.headers.get("Origin")
-        if origin is not None:
-            o = urlparse(origin)
-            if o.hostname not in LOCAL_HOSTS or (o.port or 80) != self.server.server_address[1]:
-                return False
-        return self.headers.get("Sec-Fetch-Site") != "cross-site"
+        if origin is not None and origin.lower() != f"http://{self.headers['Host'].lower()}":
+            return False
+        return self.headers.get("Sec-Fetch-Site") not in ("cross-site", "same-site")
 
     def raw_body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -668,6 +684,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError:
                 pass
         st = {k: getattr(s, k) for k in ("history", "events", "n", "lang", "artifacts", "projects", "config", "meta", "turns")}
+        # A portable transcript does not grant the recipient access to cached local document excerpts.
+        st["history"] = []
+        for message in s.history:
+            portable = {k: v for k, v in message.items() if k != "rag_hits"}
+            if message["role"] == "user":
+                portable["text"] = s._scoped_history_text(message, set())
+            st["history"].append(portable)
         st |= {"format": "sparky-chat", "version": 1, "title": title,
                "images": {i: {k: v for k, v in s.images[i].items() if k != "path"} | {"png": b} for i, b in imgs.items()}}
         self.send(200, json.dumps(st, ensure_ascii=False).encode(), "application/json",
@@ -767,44 +790,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self.send(500, {"error": f"transcription impossible : {e}"})
 
-    def import_chat(self, path):  # a conversation exported by Sparky (JSON), or a plain [{role, content}] list
+    def import_chat(self, path):
+        import chat_import
         b = self.body()
-        d = b.get("data")
-        s = harness.Session()
-        if isinstance(d, list):
-            d = {"messages": d}
-        if not isinstance(d, dict):
-            return self.send(400, {"error": "fichier non reconnu"})
-        if d.get("format") == "sparky-chat":
-            os.makedirs(s.dir, exist_ok=True)
-            for i, v in (d.get("images") or {}).items():
-                p = os.path.join(s.dir, f"import_{int(i)}.png")
-                with open(p, "wb") as f:
-                    f.write(base64.b64decode(v.pop("png", "")))
-                s.images[int(i)] = v | {"path": p}
-            for k in ("history", "events", "n", "lang", "artifacts", "projects", "config", "meta"):
-                if k in d:
-                    setattr(s, k, d[k] if k not in ("config", "meta") else getattr(s, k) | d[k])
-            s.turns = [tuple(x) for x in d.get("turns", [])]
-        else:
-            msgs = d.get("messages") or []
-            for m in msgs:
-                role, text = m.get("role"), m.get("content")
-                if isinstance(text, list):
-                    text = " ".join(x.get("text", "") for x in text if isinstance(x, dict))
-                if role == "user":
-                    s.turns.append((len(s.history), len(s.events)))
-                    s.history.append({"role": "user", "text": text or "", "images": [], "raw": text or ""})
-                    s.events.append({"type": "user", "text": text or "", "ts": time.time()})
-                elif role == "assistant":
-                    s.history.append({"role": "assistant", "text": json.dumps({"action": "reply", "args": {"text": text}}, ensure_ascii=False)})
-                    s.events.append({"type": "reply", "text": text or "", "ts": time.time()})
-            if not s.events:
-                return self.send(400, {"error": "aucun message trouvé"})
-            s.meta["title"] = (d.get("title") or "")[:60] or None
-        s.meta["title"] = s.meta.get("title") or ("Importé : " + s.title())
+        try:
+            s = chat_import.restore(b.get("data") if isinstance(b, dict) else None)
+        except ValueError:
+            return self.send(400, {"error": "fichier de conversation invalide"})
         sessions[s.id] = s
-        s.save()
         self.send(200, {"id": s.id})
 
     def chat_meta(self, path):  # rename, pin, folder
@@ -982,13 +975,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def rescan(self, path):
         self.send(200, syscheck.run())
 
-    def projrun(self, path):  # runs a project, only when the user clicks Run
+    def projrun(self, path):  # legacy URL for the Check project button
+        import checker
         b = self.body()
         s = get_session(b.get("id"))
         p = (s.projects if s else {}).get(b.get("project"))
         if not p:
             return self.send(404, {"error": "projet inconnu"})
-        self.send(200, run_project(s, b["project"], p))
+        self.send(200, checker.check(p))
 
     def onboarded(self, path):
         harness.SETTINGS["onboarded"] = True
@@ -1130,13 +1124,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif action == "style":
             S.set("style", {k: v for k, v in (b.get("style") or {}).items() if v})
         elif action == "profile":
-            p = companion.profile()
-            p.update({k: b[k] for k in ("name", "persona", "custom", "memory_on") if k in b})
-            S.set("profile", p)
+            companion.update_profile(b)
         elif action == "reflect":
             return self.send(200, {"ok": companion.reflect(force=True)})
         elif action == "forget":
-            S.forget_all()
+            companion.forget_all()
         else:
             return self.send(404, {"error": "introuvable"})
         self.send(200, {"ok": True})
@@ -1169,6 +1161,8 @@ POST_PREFIX = [("/api/transcribe", Handler.transcribe), ("/api/bot/", Handler.bo
 class PreviewHandler(Handler):
     """Generated projects, on their own origin (port + 1): their code cannot call the API above."""
 
+    preview = True
+
     def project(self, path):  # /api/proj/<session>/<project>/<path>
         import mimetypes
         try:
@@ -1192,7 +1186,27 @@ class PreviewHandler(Handler):
         self.dispatch({}, [("/api/proj/", PreviewHandler.project)])
 
     def do_POST(self):
-        self.send(403, {"error": "requête refusée"})
+        # The UI can preview even unsaved snippets without storing a copy or putting their source in the URL.
+        self.close_connection = True
+        host = urlparse("//" + (self.headers.get("Host") or "")).hostname
+        origin = self.headers.get("Origin")
+        local = host in LOCAL_HOSTS and origin == f"http://{'[' + host + ']' if host == '::1' else host}:{config.APP_PORT}"
+        if (self.path != "/artifact" or not local or self.headers.get_content_type() != "application/x-www-form-urlencoded"
+                or not self.local_owner()):
+            return self.send(403, {"error": "requête refusée"})
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+            if self.headers.get("Transfer-Encoding") or length < 0:
+                raise ValueError
+            if length > MAX_BODY:
+                return self.send(413, {"error": "fichier trop gros"})
+            form = parse_qs(self.rfile.read(length).decode(), max_num_fields=1, strict_parsing=True, keep_blank_values=True)
+            html = form["html"][0].encode()
+        except (ValueError, KeyError):
+            return self.send(400, {"error": "aperçu invalide"})
+        self.send(200, html, "text/html; charset=utf-8",
+                  [("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-modals allow-popups allow-pointer-lock"),
+                   ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer")])
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -1219,7 +1233,23 @@ def main():
     ap.add_argument("--no-comfy", action="store_true")
     a = ap.parse_args()
     config.APP_PORT, config.PREVIEW_PORT = a.port, a.port + 1
+    with process_owner.instance(config.ROOT) as stop_requested, Server(("127.0.0.1", a.port), Handler) as ui, \
+            Server(("127.0.0.1", config.PREVIEW_PORT), PreviewHandler) as preview:
+        try:
+            _serve(a, ui, preview, stop_requested)
+        finally:
+            _engines.close()
+
+
+def _serve(a, ui, preview, stop_requested):
     harness.load_settings()
+    # Older builds kept the last raw model output, even for ephemeral chats.
+    try:
+        os.unlink(os.path.join(harness.DATA, "last_llm.txt"))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        print("Could not remove the legacy last_llm.txt diagnostic. Remove it from the data folder when unlocked.")
     if harness.SETTINGS.get("llm") and harness.SETTINGS["llm"] not in LLMS:
         harness.SETTINGS["llm"] = None  # old setting pointing to a model removed from the catalog
     shutil.rmtree(os.path.join(harness.DATA, "_tmp"), ignore_errors=True)  # leftovers from ephemeral conversations
@@ -1239,10 +1269,14 @@ def main():
     threading.Thread(target=mcp.start_all, daemon=True).start()
     scheduler.start(run_scheduled)
     studio.hooks.update(before_video=pause_llm_for_video, after_queue=resume_llm_after_video)
-    preview = Server(("127.0.0.1", config.PREVIEW_PORT), PreviewHandler)
     threading.Thread(target=preview.serve_forever, daemon=True).start()
     print(f"Sparky {updater.current()} : http://127.0.0.1:{a.port}")
-    Server(("127.0.0.1", a.port), Handler).serve_forever()
+    ui.timeout = 0.25
+    try:
+        while not stop_requested():
+            ui.handle_request()
+    finally:
+        preview.shutdown()
 
 
 if __name__ == "__main__":

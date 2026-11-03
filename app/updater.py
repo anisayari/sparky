@@ -11,7 +11,7 @@ import config
 
 REPO = "anisayari/sparky"
 REMOTE_VERSION = os.environ.get("SPARKY_VERSION_URL") or f"https://raw.githubusercontent.com/{REPO}/main/VERSION"
-INSTALL_CMD = f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex"
+INSTALL_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.ps1"
 NOWIN = config.NOWIN
 CHECK_EVERY = 3600
 
@@ -71,11 +71,38 @@ def loop():
 
 def status():
     cur, latest = current(), state["latest"]
-    avail = bool(latest) and _num(latest) > _num(cur)
+    pending = config.read_json(_pending_file(), {}) or {}
+    avail = bool(pending) or (bool(latest) and _num(latest) > _num(cur))
     git, changes = is_git(), local_changes() if avail else []
-    return {"version": cur, "latest": latest, "available": avail, "git": git, "changes": changes,
+    root = config.ROOT.replace("'", "''")
+    return {"version": cur, "latest": latest or pending.get("target"), "available": avail, "git": git, "changes": changes,
             "auto": avail and git and not changes, "updating": state["updating"], "log": state["log"],
-            "command": INSTALL_CMD, "root": config.ROOT}
+            "command": f"& ([scriptblock]::Create((irm '{INSTALL_URL}'))) -Dir '{root}'", "root": config.ROOT}
+
+
+def _pending_file():
+    return os.path.join(config.ROOT, "data", "update-pending.json")
+
+
+def _finish_dependencies():
+    req = os.path.join(config.ROOT, "requirements.txt")
+    if os.path.isfile(req):
+        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req], creationflags=NOWIN, timeout=900,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode:
+            return False, "installation des dépendances impossible : " + (r.stderr or r.stdout)[-400:]
+    os.remove(_pending_file())
+    return True, ""
+
+
+def repair_on_start():
+    """Run before server imports, even when the new code requires a package that failed to install."""
+    pending = config.read_json(_pending_file(), {}) or {}
+    if not pending or (not pending.get("dependencies") and current() == pending.get("base")):
+        return True, ""  # a failed pull hasn't changed the code; the UI can still retry it
+    if not is_git() or local_changes():
+        return False, "Sources modifiées : vérifiez les changements avant de réparer les dépendances."
+    return _finish_dependencies()
 
 
 def _restart():
@@ -100,30 +127,36 @@ def _restart():
 
 def update():
     """git pull --ff-only, then restart. Returns (ok, message)."""
-    s = status()
-    if not s["available"]:
-        return False, "déjà à jour"
-    if not s["git"]:
-        return False, "installation sans git : relance la commande d'installation"
-    if s["changes"]:
-        return False, "modifications locales : " + ", ".join(s["changes"][:8])
     with _lock:  # one update at a time (two tabs, two clicks)
         if state["updating"]:
             return False, "mise à jour déjà en cours"
+        s = status()
+        if not s["available"]:
+            return False, "déjà à jour"
+        if not s["git"]:
+            return False, "installation sans git : relance la commande d'installation"
+        if s["changes"]:
+            return False, "modifications locales : " + ", ".join(s["changes"][:8])
         state.update(updating=True, log="")
     try:
-        code, out = _git("pull", "--ff-only", timeout=180)
-        out = out.strip()
-        state["log"] = out[-1500:]
-        if code != 0:
-            return False, "git pull a échoué : " + out[-400:]
-        # new Python packages, if any (quick when nothing changed); a failure must not restart into broken code
-        req = os.path.join(config.ROOT, "requirements.txt")
-        if os.path.exists(req):
-            r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req], creationflags=NOWIN, timeout=900,
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
-            if r.returncode:
-                return False, "installation des dépendances impossible : " + (r.stderr or r.stdout)[-400:]
+        marker = _pending_file()
+        pending = config.read_json(marker, {}) or {"base": current(), "target": s["latest"]}
+        out = ""
+        if not pending.get("dependencies") and current() == pending["base"]:
+            # Record intent before pull, since it changes VERSION before dependencies are installed.
+            config.write_json(marker, pending)
+            code, out = _git("pull", "--ff-only", timeout=180)
+            out = out.strip()
+            state["log"] = out[-1500:]
+            if code != 0:
+                return False, "git pull a échoué : " + out[-400:]
+        pending["dependencies"] = True
+        config.write_json(marker, pending)
+        ok, error = _finish_dependencies()
+        if not ok:
+            return False, error
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
     finally:
         state["updating"] = False
     threading.Thread(target=_restart, daemon=True).start()
@@ -132,3 +165,12 @@ def update():
 
 def start():
     threading.Thread(target=loop, daemon=True).start()
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--repair"]:
+    try:
+        ok, message = repair_on_start()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, message = False, str(e)
+    if not ok:
+        sys.exit(message)

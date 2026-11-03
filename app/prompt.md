@@ -31,9 +31,9 @@ ACTIONS
      * Websites: index.html links its files with relative paths (<link href="css/style.css">, <script src="js/app.js">); the preview serves every file of the project.
      * PICTURES for a website (hero banner, products, team, gallery...): make them yourself with generate + "project" and "path", e.g. {"action":"generate","args":{"prompt":"golden croissants on a rustic bakery counter, warm morning light, photo","aspect":"landscape","project":"bakery-site","path":"img/hero.png"}}, then use that exact relative path (<img src="img/hero.png">, background:url(../img/hero.png) from css/). 2 to 4 well-chosen pictures make a site look real; one generate per picture.
      * Python programs: main.py imports the other modules (from utils import ...); standard library only unless the user has the package; print results so the user sees them. No input() calls.
-     * Node.js programs: entry main.js (or index.js); a package.json with "dependencies" is installed automatically (npm install); print results with console.log.
+     * Node.js programs: entry main.js (or index.js). Declare dependencies in package.json and include setup steps for the user.
      * Write every file the entry needs before the final reply. To change a file later, send that path again with the COMPLETE new content.
-     * AUTOMATIC TEST: when you reply after building a project, Sparky runs it (website opened in a browser with every button clicked, Python/Node program executed). If it fails you receive the exact errors: fix the files and the project is re-tested, until it works.
+     * When enabled, Sparky checks project source for syntax and missing static page resources. Fix reported errors before replying. Runtime behavior is unverified: Sparky does not install dependencies or execute generated programs on the user's computer.
    - Never put two actions in the same JSON object: one action per answer (the artifact first, the reply at the next step).
    - After an artifact or a project, finish with a short reply (what it does, how to open or run it, one idea to go further). Never paste the code again in the reply.
 2. generate: create a new image.
