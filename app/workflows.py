@@ -1,4 +1,5 @@
 """A resumable document search and cited summary, held for explicit human review."""
+import hashlib
 import json
 import os
 import time
@@ -6,6 +7,7 @@ import uuid
 
 import harness
 import rag
+import scheduler
 import turn_runtime
 
 
@@ -14,6 +16,15 @@ def new_run():
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         if not os.path.exists(os.path.join(harness.DATA, sid)):
             return {"id": uuid.uuid4().hex, "session": sid, "phase": "search"}
+
+
+def result_digest(sid, run_id):
+    import config
+    record = config.read_json(os.path.join(harness.DATA, sid, "session.json"), {})
+    if (record.get("meta") or {}).get("workflow_run") != run_id:
+        return None
+    transcript = json.dumps(record["events"], sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(transcript).hexdigest()
 
 
 def summarize(task, run, checkpoint):
@@ -46,7 +57,8 @@ def summarize(task, run, checkpoint):
         cloud = harness.cloud_model()
         window = cloud.get("context") if cloud else harness.ACTIVE_CONTEXT or harness.SETTINGS.get("llm_ctx")
         messages, budget = turn_runtime.fit(messages, window or 16384, 1200)
-        reply = harness.chat_once({"messages": messages, "max_tokens": budget}).strip()
+        with rag.guard_request(refs, lambda: scheduler.workflow_sources(task["id"], run["id"])):
+            reply = harness.chat_once({"messages": messages, "max_tokens": budget}).strip()
     finally:
         harness.required_model.reset(binding)
     if not reply or len(rag.live_hits(refs, selected)) != len(refs):
@@ -62,5 +74,8 @@ def summarize(task, run, checkpoint):
                       {"type": "sources", "kind": "docs", "items": [
                           {"n": h["source_number"], "title": h["doc"] + (f" · p. {h['page']}" if h.get("page") else "")} for h in hits]},
                       {"type": "reply", "text": reply}, {"type": "done", "status": "completed"}]
-    session.save()
+    with scheduler.workflow_sources(task["id"], run["id"]) as current:
+        if selected != current:
+            raise ValueError("Séquence annulée.")
+        session.save()
     return sid

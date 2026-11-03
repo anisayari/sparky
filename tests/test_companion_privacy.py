@@ -66,7 +66,7 @@ def bot(isolated_bot, monkeypatch):
 
 
 @pytest.mark.parametrize("provider", ["custom", "anthropic"])
-@pytest.mark.parametrize("transition", ["unchanged", "disable", "forget", "local_only"])
+@pytest.mark.parametrize("transition", ["unchanged", "disable", "forget", "delete_fact", "edit_style", "local_only"])
 def test_consent_at_transport_open(isolated_bot, clean_cloud, mock_provider, monkeypatch, provider, transition):
     import mocks
     bot = isolated_bot
@@ -76,12 +76,17 @@ def test_consent_at_transport_open(isolated_bot, clean_cloud, mock_provider, mon
     model = clean_cloud.entry(provider, "mock/model")
     monkeypatch.setattr(bot.harness, "cloud_model", lambda: model)
     original = clean_cloud.stream
+    fact = bot.S.add_memory("synthetic memory", source="user")
 
     def delayed(*args, **kwargs):
         if transition == "disable":
             bot.update_profile({"memory_on": False})
         elif transition == "forget":
             bot.forget_all()
+        elif transition == "delete_fact":
+            bot.edit_memory({"id": fact, "delete": True})
+        elif transition == "edit_style":
+            bot.edit_style({})
         elif transition == "local_only":
             bot.update_profile({"local_only": True})
         yield from original(*args, **kwargs)

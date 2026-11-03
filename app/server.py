@@ -848,15 +848,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         s = get_session(b.get("id"))
         if not s:
             return self.send(404, {"error": "conversation inconnue"})
-        apply_config(s, b.get("config") or {})
-        s.save()
-        self.send(200, {"ok": True, "config": s.config})
+        changes = b.get("changes")
+        if not isinstance(changes, dict):
+            # Older tabs sent their entire snapshot even when editing an unrelated preference.
+            return self.send(409, {"error": "Recharge cet onglet avant de modifier les autorisations."})
+        if set(changes) - {"assistant", "system", "web", "web_blocked", "computer", "document_choice"}:
+            return self.send(400, {"error": "Un réglage documentaire modifie une seule collection à la fois."})
+        with s._storage_lock:
+            if "document_choice" in changes:
+                choice = changes["document_choice"]
+                if (set(changes) != {"document_choice"} or not isinstance(choice, dict) or
+                        type(choice.get("id")) is not int or type(choice.get("selected")) is not bool):
+                    return self.send(400, {"error": "Choix de collection invalide."})
+                cid, enable = choice["id"], choice["selected"]
+                if enable and not rag.existing_collections([cid]):
+                    return self.send(404, {"error": "Cette collection a été supprimée."})
+                docs = set(s.config.get("docs") or []) - {cid}
+                excluded = set(s.config.get("excluded_docs") or []) - {cid}
+                if not enable:
+                    excluded.add(cid)
+                elif cid not in (s.assistant().get("docs") or []):
+                    docs.add(cid)
+                changes = {"docs": sorted(docs), "excluded_docs": sorted(excluded)}
+            apply_config(s, changes)
+            s.save()
+            current = dict(s.config)
+        self.send(200, {"ok": True, "config": current})
 
     def version(self, path):  # shows another version of a message (after edit / regenerate)
         b = self.body()
         s = get_session(b.get("id"))
         if not s or s.lock.locked():
             return self.send(409, {"error": "conversation occupée"})
+        if s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         with s.lock:
             s.switch_version(int(b["k"]), int(b["j"]))
         self.send(200, {"ok": True})
@@ -867,6 +892,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         s = get_session(b.get("id"))
         if not s:
             return self.send(404, {"error": "conversation inconnue"})
+        if s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         emit = self.stream()
         emit({"type": "ack", "id": s.id, "busy": s.lock.locked()})
         if not llm_state["name"]:
@@ -951,6 +978,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif act == "run":
                     if not scheduler.run_now(b.get("id")):
                         return self.send(409, {"error": "Tâche indisponible ou en attente de validation."})
+                elif act == "cancel":
+                    if not scheduler.cancel_workflow(b.get("id"), b.get("run")):
+                        return self.send(409, {"error": "Cette séquence n’est plus en cours."})
                 elif act == "review":
                     if not scheduler.review_result(b.get("id"), b.get("run"), b.get("decision")):
                         return self.send(409, {"error": "Ce résultat n’est plus en attente de validation."})
@@ -1007,7 +1037,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, {"ok": True})
 
     def new_session(self, path):
-        s = harness.Session(ephemeral=bool(self.body().get("ephemeral")))
+        b = self.body()
+        s = harness.Session(ephemeral=bool(b.get("ephemeral")))
+        if isinstance(b.get("config"), dict):
+            apply_config(s, b["config"])
+        s.save()
         # a previous ephemeral conversation disappears as soon as another one is opened
         with _sessions_lock:
             for k, v in list(sessions.items()):
@@ -1023,6 +1057,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if s and not s.delete():
                 return self.send(409, {"error": "Conversation en cours. Arrête la génération avant de la supprimer."})
             sessions.pop(sid, None)
+            if s:
+                scheduler.remove_result(sid)
         self.send(200, {"ok": True})
 
     def install(self, path):
@@ -1139,11 +1175,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def chat(self, path):
         b = self.body()
         s = get_session(b.get("id"))
+        if s and s.meta.get("workflow_run"):
+            return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
         if s is None:  # unknown id (e.g. after a restart): a private chat must stay private
             s = harness.Session(ephemeral=bool(b.get("ephemeral")))
-            sessions[s.id] = s
-        if isinstance(b.get("config"), dict):  # setup chosen before the first message (assistant, web, documents)
-            apply_config(s, b["config"])
+            if not b.get("id") and isinstance(b.get("config"), dict):
+                apply_config(s, b["config"])
+            with _sessions_lock:
+                sessions[s.id] = s
         emit = self.stream()
         emit({"type": "ack", "id": s.id, "busy": s.lock.locked()})  # received by the server
         wait_llm(emit)
@@ -1159,7 +1198,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def bot(self, path):
         """Sparky Bot: companion with long-term memory (see companion.py)."""
         import companion
-        action, b, S = path[len("/api/bot/"):], self.body(), companion.S
+        action, b = path[len("/api/bot/"):], self.body()
         if action in ("chat", "greet"):
             if not llm_state["name"]:
                 return self.send(409, {"error": NO_ASSISTANT})
@@ -1175,14 +1214,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit({"type": "done"})
             return
         if action == "memory":  # add / edit / delete / pin one memory
-            if b.get("delete"):
-                S.delete_memory(int(b["id"]))
-            elif b.get("id"):
-                S.update_memory(int(b["id"]), b.get("text"), b.get("category"), b.get("importance"), b.get("pinned"))
-            else:
-                S.add_memory(b.get("text", ""), b.get("category", "other"), int(b.get("importance") or 4), source="user")
+            companion.edit_memory(b)
         elif action == "style":
-            S.set("style", {k: v for k, v in (b.get("style") or {}).items() if v})
+            companion.edit_style(b.get("style") or {})
         elif action == "profile":
             companion.update_profile(b)
         elif action == "reflect":

@@ -1,10 +1,10 @@
 """User workspace: assistants (presets: role, knowledge, web access) and the prompt library ("/" commands)."""
-import os, re, threading, time, uuid
+import contextlib, os, re, threading, time, uuid
 
 import config
 
 FILE = os.path.join(config.DATA, "workspace.json")
-_lock = threading.Lock()
+_lock = threading.RLock()
 EXAMPLES = {
     "assistants": [
         {"id": "translator", "name": "Traducteur", "emoji": "🌍", "web": False, "docs": [],
@@ -50,6 +50,11 @@ def get():
 
 def assistant(aid):
     return next((a for a in get()["assistants"] if a["id"] == aid), None) if aid else None
+
+
+def assistant_scope(aid):
+    """Hold a selected preset stable while admitting a request that uses its documents."""
+    return _lock if aid else contextlib.nullcontext()
 
 
 def _clean(kind, item):

@@ -753,6 +753,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
     </div>
   </div></div>
   <footer>
+    <div id="reviewNotice" hidden>Synthèse en lecture seule. Pour poursuivre, créez une discussion depuis un message.</div>
     <div id="box">
       <div id="att"></div>
       <div id="row">
@@ -951,6 +952,8 @@ const EN={
  'outil(s)':'tool(s)','Enregistrer et démarrer':'Save and start','JSON invalide : ':'Invalid JSON: ',
  'Choisis le modèle et les outils de la tâche. Pour une synthèse à valider, choisis une collection. Sparky doit rester ouvert.':'Choose the model and tools for the task. Select a collection to create a cited summary for review. Sparky must remain open.',
  'Synthèse à valider':'Summary for review','Tâche simple':'Simple task','Modèle actif au démarrage de la tâche':'Model active at task start',
+ 'Annuler la séquence':'Cancel workflow','Séquence annulée':'Workflow cancelled','Collection indisponible':'Collection unavailable',
+ 'Synthèse en lecture seule. Pour poursuivre, créez une discussion depuis un message.':'This summary is read-only. To continue, start a new chat from a message.',
  'Valider cette synthèse':'Approve this summary','Refuser cette synthèse':'Reject this summary','En attente de validation':'Awaiting review',
  'Recherche documentaire':'Document search','Synthèse en cours':'Summarizing','Synthèse validée':'Summary approved','Synthèse refusée':'Summary rejected',
  'chaque jour à':'every day at','chaque':'every','à':'at','toutes les':'every','une fois, le':'once, on','prochaine :':'next:','en pause':'paused','dernière :':'last:',
@@ -1552,12 +1555,14 @@ function upd(){const fr=pfiles.filter(f=>f.state==='ok').length,wait=pfiles.some
 ta.addEventListener('input',upd);ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 $('send').onclick=send;
 async function send(){
+  if(CFG.reviewSnapshot)return;
   const docs=pfiles.filter(f=>f.state==='ok');
   const text=ta.value.trim();if(busy||document.body.classList.contains('loading-chat')||pfiles.some(f=>f.state==='reading'||f.state==='upload')||!(text||pend.length||docs.length))return;busy=true;
   const imgs=pend.slice(),m=mask;userMsg(text,imgs,null,m?.for,null,'pending',docs);   // affiché tout de suite
   ta.value='';pend=[];pfiles=[];mask=null;renderAtt();upd();newTurn();
   try{
-    if(!SID){const r=await(await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ephemeral:EPH})})).json();SID=r.id;if(!EPH){try{localStorage.setItem('sparky.sid',SID)}catch{}}}
+    if(!SID)await createChat();
+    await flushConfig(SID);
     setTicks(lastUser,'sent');
     await streamTo('/api/chat',{id:SID,turnId:crypto.randomUUID(),ephemeral:EPH,text,images:imgs,files:docs.map(f=>f.id),mask:m?.data||null,maskFor:m?.for||null});
   }catch(e){onEvent({type:'error',text:'Message non envoyé : '+e.message},true)}
@@ -1943,11 +1948,12 @@ let CFG=CFG0(),WS={assistants:[],prompts:[],knowledge:[],schedules:[],unread:[]}
 const _open0=open_,_blank0=blank;
 let navigation=0;
 open_=async function(id){if(busy)return;const request=++navigation;document.body.classList.add('loading-chat');upd();
-  try{const r=await fetch('/api/state?id='+encodeURIComponent(id));if(!r.ok)throw new Error(r.statusText);
+  try{if(configWrites.has(id))await flushConfig(id);
+    const r=await fetch('/api/state?id='+encodeURIComponent(id));if(!r.ok)throw new Error(r.statusText);
     const s=await r.json();if(request!==navigation)return;
     SID=id;setEph(false);log.innerHTML=HELLO;T=null;resetArts();UIDX=-1;
     try{localStorage.setItem('sparky.sid',id)}catch{}
-    VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{});const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
+    VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{},{reviewSnapshot:!!s.meta?.workflow_run});const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
     s.events.forEach(e=>onEvent(e,false));if(T){hideTyping();T=null}renderTools();down(true);loadList();ta.focus()}
   catch(e){if(request===navigation)alert(tr('Impossible d’ouvrir la conversation')+' · '+e.message)}
   finally{if(request===navigation){document.body.classList.remove('loading-chat');upd()}}};
@@ -1988,13 +1994,13 @@ function replyActs(a,k){a.querySelector(':scope>.mact')?.remove();document.query
   b(ICS.copy,'Copier',x=>{navigator.clipboard.writeText(raw());x.innerHTML=ICS.ok;setTimeout(()=>x.innerHTML=ICS.copy,1400)});
   b(ICS.speak,'Lire à voix haute',x=>speak(raw(),x));
   if(k>=0&&!EPH)b(ICS.copy,'Créer une discussion depuis cette réponse',()=>forkChat(k,'reply'));
-  if(k>=0&&!EPH){b(ICS.regen,'Régénérer la réponse',()=>redo('regen',k));b(ICS.cont,'Continuer la réponse',()=>redo('continue',k),'cont')}
+  if(k>=0&&!EPH&&!CFG.reviewSnapshot){b(ICS.regen,'Régénérer la réponse',()=>redo('regen',k));b(ICS.cont,'Continuer la réponse',()=>redo('continue',k),'cont')}
   a.append(m)}
 function userActs(u,k,text){u.querySelector('.uact')?.remove();if(k<0||EPH)return;const bar=el('div','uact');const v=VERS[String(k)];
   const fork=el('button','','⑂');fork.title='Créer une discussion depuis ce message';fork.setAttribute('aria-label',fork.title);fork.onclick=()=>forkChat(k,'user');bar.append(fork);
   if(v&&v.n>1){bar.classList.add('vers');const p=el('button','',ICS.prev),n=el('button','',ICS.next);p.title='Version précédente';n.title='Version suivante';
     p.disabled=v.cur<=0;n.disabled=v.cur>=v.n-1;p.onclick=()=>switchVer(k,v.cur-1);n.onclick=()=>switchVer(k,v.cur+1);bar.append(p,el('span','',(v.cur+1)+' / '+v.n),n)}
-  if(text){const ed=el('button','',ICS.edit);ed.title='Modifier le message';ed.onclick=()=>editMsg(u,k,text);bar.append(ed)}
+  if(text&&!CFG.reviewSnapshot){const ed=el('button','',ICS.edit);ed.title='Modifier le message';ed.onclick=()=>editMsg(u,k,text);bar.append(ed)}
   const cp=el('button','',ICS.copy);cp.title='Copier';cp.onclick=()=>{navigator.clipboard.writeText(text);cp.innerHTML=ICS.ok;setTimeout(()=>cp.innerHTML=ICS.copy,1400)};if(text)bar.append(cp);
   u.insertBefore(bar,u.querySelector('.st'))}
 function editMsg(u,k,text){if(busy)return;const box=el('div','uedit');const t=el('textarea');t.value=text;
@@ -2016,7 +2022,7 @@ async function streamTo(url,body){
 async function redo(mode,k,text){if(busy||document.body.classList.contains('loading-chat')||!SID)return;busy=true;upd();
   if(mode!=='continue'){const u=log.querySelector('.u[data-k="'+k+'"]');if(u){let n=u;while(n){const x=n.nextSibling;n.remove();n=x}}UIDX=k+TBASE-1;lastUser=null}
   T=null;newTurn();showTyping('');
-  try{await streamTo('/api/redo',{id:SID,turnId:crypto.randomUUID(),mode,k,text})}catch(e){onEvent({type:'error',text:'Échec : '+e.message},true)}
+  try{await flushConfig(SID);await streamTo('/api/redo',{id:SID,turnId:crypto.randomUUID(),mode,k,text})}catch(e){onEvent({type:'error',text:'Échec : '+e.message},true)}
   finally{busy=false;if(T)onEvent({type:'done'},true);upd();if(mode!=='continue')open_(SID);else loadList()}}
 
 // ---------- read aloud (Piper voices, offline)
@@ -2032,37 +2038,82 @@ async function speak(text,btn){if(SPK){const same=SPK.btn===btn;SPK.audio.pause(
 
 // ---------- conversation setup chips: assistant, web, documents, instructions
 function renderTools(){const t=$('tools');if(!t)return;t.innerHTML='';
+  $('box').style.display=CFG.reviewSnapshot?'none':'';$('reviewNotice').hidden=!CFG.reviewSnapshot;
   const a=WS.assistants.find(x=>x.id===CFG.assistant);
   const ch=(ic,label,on,fn,title)=>{const b=el('button',on?'on':'',ic+'<span>'+esc(label)+'</span>');b.title=title||'';b.onclick=ev=>{ev.stopPropagation();fn(b)};t.append(b);return b};
   ch(a?'<span>'+esc(a.emoji||'🤖')+'</span>':ICS.person,a?a.name:tr('Assistant'),!!a,assistantMenu,'Choisir un assistant (rôle, documents, web)');
-  const web=!CFG.web_blocked&&!!(CFG.web||a?.web);ch(ICS.globe,tr('Web')+(a?.web?' · '+tr('Assistant'):''),web,()=>{CFG.web=!web;CFG.web_blocked=web;saveCfg()},'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
+  const web=!CFG.web_blocked&&!!(CFG.web||a?.web);ch(ICS.globe,tr('Web')+(a?.web?' · '+tr('Assistant'):''),web,()=>{CFG.web=!web;CFG.web_blocked=web;saveCfg('web','web_blocked')},'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
   const nd=WS.knowledge.filter(c=>(CFG.docs.includes(c.id)||a?.docs?.includes(c.id))&&!CFG.excluded_docs.includes(c.id)).length;ch(ICS.books,nd?tr('Documents')+' ('+nd+')':tr('Documents'),nd>0,docsMenu,'Répondre à partir de tes documents');
   ch(ICS.note,tr('Instructions'),!!CFG.system,openSysd,'Instructions pour cette conversation')}
-async function saveCfg(){renderTools();if(SID&&!EPH)await post('/api/config',{id:SID,config:CFG})}
+// Serialize preference edits for each conversation. A pending revocation precedes any new turn.
+const configWrites=new Map();
+let creatingChat=null;
+function updateLocalConfig(config,patch){
+  if(!patch.document_choice){Object.assign(config,patch);return}
+  const {id,selected}=patch.document_choice;
+  const inherited=WS.assistants.find(a=>a.id===config.assistant)?.docs||[];
+  config.docs=config.docs.filter(cid=>cid!==id);
+  config.excluded_docs=config.excluded_docs.filter(cid=>cid!==id);
+  if(!selected)config.excluded_docs.push(id);
+  else if(!inherited.includes(id))config.docs.push(id);
+}
+function flushConfig(id,changes=[]){
+  let state=configWrites.get(id);
+  if(!state){if(!changes.length)return Promise.resolve();state={pending:[],writing:null};configWrites.set(id,state)}
+  state.pending.push(...changes);
+  if(!state.writing){
+    state.writing=(async()=>{
+      while(state.pending.length){
+        const patch=state.pending[0];
+        const r=await post('/api/config',{id,changes:patch});const body=await r.json();
+        if(!r.ok){
+          if(r.status>=400&&r.status<500)state.pending.shift();
+          throw new Error(body.error||r.statusText)
+        }
+        state.pending.shift();
+        if(SID===id){CFG=Object.assign(CFG0(),body.config);state.pending.forEach(next=>updateLocalConfig(CFG,next));renderTools()}
+      }
+    })().finally(()=>{state.writing=null;if(!state.pending.length)configWrites.delete(id)});
+  }
+  return state.writing;
+}
+function saveChange(change){
+  renderTools();
+  if(SID)return flushConfig(SID,[change]).catch(e=>alert(e.message));
+  if(creatingChat)creatingChat.push(change);
+}
+function saveCfg(...fields){
+  return saveChange(Object.fromEntries(fields.map(key=>[key,structuredClone(CFG[key])])));
+}
+async function createChat(){
+  const duringCreation=creatingChat=[];
+  try{
+    const r=await post('/api/new',{ephemeral:EPH,config:CFG}),body=await r.json();
+    if(!r.ok||!body.id)throw new Error(body.error||r.statusText);
+    SID=body.id;if(!EPH){try{localStorage.setItem('sparky.sid',SID)}catch{}}
+    await flushConfig(SID,duringCreation);
+  }finally{creatingChat=null}
+}
 function menuAt(anchor,build){const m=$('menu');m.innerHTML='';build(m);m.style.display='block';const r=anchor.getBoundingClientRect();
   const h=m.offsetHeight,w=m.offsetWidth;m.style.left=Math.max(8,Math.min(innerWidth-w-8,r.left))+'px';m.style.top=(r.bottom+h+8<innerHeight?r.bottom+4:Math.max(8,r.top-h-4))+'px'}
 document.addEventListener('click',e=>{if(!e.target.closest('#menu'))$('menu').style.display='none'});
 const mItem=(m,html,fn,cls)=>{const b=el('button',cls||'',html);b.onclick=ev=>{ev.stopPropagation();$('menu').style.display='none';fn()};m.append(b);return b};
 function assistantMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Assistant')));
-  mItem(m,(CFG.assistant?'':'✓ ')+esc(tr('Par défaut (Sparky)')),()=>{CFG.assistant=null;saveCfg()});
-  WS.assistants.forEach(a=>mItem(m,(CFG.assistant===a.id?'✓ ':'')+esc((a.emoji||'🤖')+' '+a.name),()=>{CFG.assistant=a.id;saveCfg()}));
+  mItem(m,(CFG.assistant?'':'✓ ')+esc(tr('Par défaut (Sparky)')),()=>{CFG.assistant=null;saveCfg('assistant')});
+  WS.assistants.forEach(a=>mItem(m,(CFG.assistant===a.id?'✓ ':'')+esc((a.emoji||'🤖')+' '+a.name),()=>{CFG.assistant=a.id;saveCfg('assistant')}));
   m.append(el('hr'));mItem(m,esc(tr('Gérer les assistants…')),()=>openWs('assistants'))})}
 function docsMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Répondre à partir de')));
   if(!WS.knowledge.length)m.append(el('div','hd',tr('Aucune collection pour l’instant.')));
   const preset=WS.assistants.find(a=>a.id===CFG.assistant)?.docs||[];
   WS.knowledge.forEach(c=>{const l=el('label');const x=el('input');x.type='checkbox';x.checked=(CFG.docs.includes(c.id)||preset.includes(c.id))&&!CFG.excluded_docs.includes(c.id);
-    x.onchange=()=>{CFG.docs=CFG.docs.filter(i=>i!==c.id);CFG.excluded_docs=CFG.excluded_docs.filter(i=>i!==c.id);
-      if(x.checked){if(!preset.includes(c.id))CFG.docs.push(c.id)}else CFG.excluded_docs.push(c.id);saveCfg()};
+    x.onchange=()=>{const change={document_choice:{id:c.id,selected:x.checked}};updateLocalConfig(CFG,change);saveChange(change)};
     l.append(x,document.createTextNode(c.name+' ('+c.docs.length+')'+(preset.includes(c.id)?' · '+tr('Assistant'):'')));l.onclick=e=>e.stopPropagation();m.append(l)});
   m.append(el('hr'));mItem(m,esc(tr('Ajouter des documents…')),()=>openWs('knowledge'))})}
 function openSysd(){$('sysT').value=CFG.system||'';$('sysd').style.display='grid';$('sysT').focus()}
 $('sysX').onclick=()=>$('sysd').style.display='none';
-$('sysOk').onclick=()=>{CFG.system=$('sysT').value.trim();$('sysd').style.display='none';saveCfg()};
+$('sysOk').onclick=()=>{CFG.system=$('sysT').value.trim();$('sysd').style.display='none';saveCfg('system')};
 $('sysd').onclick=e=>{if(e.target.id==='sysd')$('sysd').style.display='none'};
 
-// the setup chosen before the first message goes with it
-const _fetch0=window.fetch;
-window.fetch=function(u,o){if(u==='/api/chat'&&o?.body){try{const b=JSON.parse(o.body);b.config=CFG;o={...o,body:JSON.stringify(b)}}catch{}}return _fetch0(u,o)};
 
 // ---------- "/" prompt library
 let SL={on:false,i:0,items:[]};
@@ -2190,14 +2241,17 @@ function wsTasks(B){B.append(el('p','wsnote',tr('Choisis le modèle et les outil
   WS.schedules.forEach(t=>{const sub=whenText(t.when)+(t.enabled?(t.next_run?' · '+tr('prochaine :')+' '+new Date(t.next_run*1000).toLocaleString():''):' · '+tr('en pause'))
       +(t.last_run?' · '+tr('dernière :')+' '+new Date(t.last_run*1000).toLocaleString():'')+(t.last_error?' · ⚠ '+t.last_error:'');
     const phase=t.run?.phase,review=phase==='review',running=phase==='search'||phase==='summarize';
-    const phases={search:'Recherche documentaire',summarize:'Synthèse en cours',review:'En attente de validation',approved:'Synthèse validée',rejected:'Synthèse refusée'};
+    const phases={search:'Recherche documentaire',summarize:'Synthèse en cours',review:'En attente de validation',approved:'Synthèse validée',rejected:'Synthèse refusée',cancelled:'Séquence annulée'};
     const btns=review||running?[]:[['Lancer maintenant',async()=>{await wsSave({what:'schedule',action:'run',id:t.id});setTimeout(renderWs,1000)}]];
+    if(running)btns.push(['Annuler la séquence',async()=>{await wsSave({what:'schedule',action:'cancel',id:t.id,run:t.run.id});renderWs()}]);
     if(t.last_session)btns.push([(WS.unread||[]).includes(t.id)?'Voir le résultat •':'Voir le résultat',async()=>{await wsSave({what:'schedule',action:'read',id:t.id});$('ws').classList.remove('open');open_(t.last_session);loadWS()}]);
     if(review)for(const [decision,title] of [['approved','Valider cette synthèse'],['rejected','Refuser cette synthèse']]){
       btns.push([title,async()=>{await wsSave({what:'schedule',action:'review',id:t.id,run:t.run.id,decision});renderWs()}]);}
     if(!review&&!running)btns.push(['Modifier',()=>form(t)]);
     btns.push(['Supprimer',async()=>{await wsSave({what:'schedule',action:'delete',id:t.id});renderWs()},'del']);
     L.append(wsItem('⏰',t.title,sub+(phases[phase]?' · '+tr(phases[phase]):''),btns))});
+  if(WS.schedules.some(t=>['search','summarize'].includes(t.run?.phase)))wsTimer=setTimeout(()=>{
+    if($('ws').classList.contains('open')&&WTAB==='tasks'&&!B.querySelector('.wsf'))renderWs()},1500);
   const add=el('button','wsbtn','+ '+tr('Nouvelle tâche'));add.style.marginTop='10px';add.onclick=()=>form({when:{type:'daily',time:'08:00'},enabled:true});B.append(add);
   function form(t){B.querySelector('.wsf')?.remove();const f=el('div','wsf'),w=t.when||{};
     const ti=inp('text',t.title,'Revue de presse'),pr=inp('textarea',t.prompt,'Fais-moi un résumé des 5 actualités tech les plus importantes du jour, avec les sources.');
@@ -2338,7 +2392,7 @@ const ICPC='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="
 function pcMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Accès à l’ordinateur')));
   Object.entries(PCL).forEach(([k,[t,d]])=>{const x=mItem(m,(CFG.computer===k?'✓ ':'')+'<span>'+esc(tr(t))+(k==='ask'?' ★':'')+'<small>'+esc(tr(d))+'</small></span>',()=>{
       if(k==='full'&&!confirm(tr('Accès complet : Sparky pourra modifier, déplacer, mettre à la corbeille, ouvrir des applications et lancer des commandes sans te demander.\n\nLes dossiers système restent protégés et rien n’est supprimé définitivement. Continuer ?')))return;
-      CFG.computer=k;saveCfg()});x.classList.add('lv')})})}
+      CFG.computer=k;saveCfg('computer')});x.classList.add('lv')})})}
 const _renderTools0=renderTools;
 renderTools=function(){_renderTools0();const t=$('tools');if(!t)return;const lv=CFG.computer||'off';
   const b=el('button',lv==='off'?'':(lv==='full'?'on pc-full':'on'),ICPC+'<span>'+esc(tr('Ordinateur'))+(lv==='off'?'':' · '+esc(tr(PCL[lv][0].split(',')[0])))+'</span>');
@@ -2358,7 +2412,9 @@ onEvent=function(e,live){
       +(e.preview?'<details><summary>'+esc(tr('Contenu qui sera écrit'))+'</summary><code>'+esc(e.preview)+'</code></details>':'');
     const b=el('div','b'),res=el('div','res');
     [['once','Autoriser','go'],['always','Toujours pour cette conversation',''],['deny','Refuser','no']].forEach(([k,t,cls])=>{const x=el('button',cls,esc(tr(t)));
-      x.onclick=async()=>{b.querySelectorAll('button').forEach(y=>y.disabled=true);const r=await post('/api/approve',{id:SID,aid:e.id,decision:k});
+      x.onclick=async()=>{b.querySelectorAll('button').forEach(y=>y.disabled=true);const id=SID;
+        if(k!=='deny'){try{await flushConfig(id)}catch(err){res.textContent=err.message;b.querySelectorAll('button').forEach(y=>y.disabled=false);return}}
+        const r=await post('/api/approve',{id,aid:e.id,decision:k});
         if(!r.ok){res.textContent=tr('Demande expirée.');}};b.append(x)});
     if(!live){b.querySelectorAll('button').forEach(y=>y.disabled=true);res.textContent=tr('Demande expirée.')}
     d.append(b,res);A().append(d);if(T.pc)T.pc.querySelector('.st').textContent=tr('en attente de ton accord');down(true);return}

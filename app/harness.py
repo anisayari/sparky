@@ -89,8 +89,11 @@ IMAGE MODEL = {label} — these rules REPLACE the SDXL-specific ones above (weig
 - TEXT CHECK: when the image contains requested text, read it letter by letter (accents, spaces, punctuation) and compare with the request; any wrong or extra character = failure, fix it with an edit like: Replace the title text with exactly "Les Néons"."""
 
 
-def system_prompt():
+def system_prompt(images=True):
     """Re-read on every call: prompt.md can be tweaked without restarting."""
+    if not images or not SETTINGS.get("ckpt") or not (config.EXTERNAL_COMFY or os.path.isfile(os.path.join(config.COMFY_DIR, "main.py"))):
+        with open(os.path.join(config.APP, "prompt-chat.md"), encoding="utf-8") as f:
+            return f.read()
     m = image_model()
     info = f"{m['label']} ({m.get('style') or 'general'} style)"
     base = open(PROMPT_FILE, encoding="utf-8").read() + "\nCurrent image model: " + info + "."
@@ -106,7 +109,11 @@ def http_json(url, payload=None, timeout=900):
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data, {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        import rag
+        gate = rag.admission.get() if url == LLM + "/v1/chat/completions" else contextlib.nullcontext
+        with gate():
+            response = urllib.request.urlopen(req, timeout=timeout)
+        with response as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"{url} -> {e.code} : {e.read().decode(errors='replace')[:600]}") from None
@@ -125,10 +132,13 @@ def cloud_model():
 def llama_deltas(body):
     """Streams llama-server's answer: yields (text, reasoning) pieces."""
     import process_owner
+    import rag
     process_owner.require_endpoint(LLM + "/v1/chat/completions")
     req = urllib.request.Request(LLM + "/v1/chat/completions", json.dumps(body | {"stream": True}).encode(),
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=900) as r, turn_runtime.response(r):
+    with rag.admission.get()():
+        response = urllib.request.urlopen(req, timeout=900)
+    with response as r, turn_runtime.response(r):
         for raw in r:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data: ") or line == "data: [DONE]":
@@ -209,7 +219,7 @@ def comfy_file(im, prefix):
 def image_model():
     """Catalog entry of the active image model (engine 'sdxl' or 'qwen21')."""
     import catalog
-    m = next((c for c in catalog.CATALOG if c.get("ckpt") == SETTINGS["ckpt"]), None)
+    m = next((c for c in catalog.CATALOG if c["kind"] == "image" and c.get("ckpt") == SETTINGS["ckpt"]), None)
     return m or {"engine": "sdxl", "ckpt": SETTINGS["ckpt"], "label": SETTINGS["ckpt"] or "aucun"}
 
 
@@ -542,7 +552,7 @@ class Session:
         self.events = []   # to rebuild the UI
         self.n = 0
         self.lock = threading.Lock()
-        self._storage_lock = threading.Lock()
+        self._storage_lock = threading.RLock()
         self._deleted = False
         self._run_guard = threading.Lock()
         self._running = None  # (turn id, cancellation event) while a turn holds the conversation lock
@@ -674,8 +684,7 @@ class Session:
         return max(ids) if ids else None
 
     def catalog(self):
-        return self._catalog() + self._artifacts() + (
-            f"\nREPLY LANGUAGE: {self.lang}. Write \"thought\" and \"reply\" in {self.lang}." if self.lang else "")
+        return (self._catalog() if self.images else "") + self._artifacts()
 
     def _artifacts(self):
         """Current content of each artifact (the history only keeps a mention, to avoid duplicating it)."""
@@ -851,7 +860,7 @@ class Session:
 
     # -- LLM
     @staticmethod
-    def _scoped_history_text(h, selected):
+    def _scoped_history_text(h, selected, used=None):
         import rag
         text = h["text"]
         # Old builds appended unlabelled excerpts to the user's raw input and attachment note.
@@ -865,10 +874,12 @@ class Session:
             text = "[DOCUMENTS]"
         allowed = rag.live_hits(h.get("rag_hits", []), selected)
         if allowed:
+            if used is not None:
+                used.extend({key: hit[key] for key in ("collection_id", "doc_id", "revision", "chunk_id")} for hit in allowed)
             text += "\n[" + rag.context_block(allowed) + "]"
         return text
 
-    def llm_messages(self, with_anchor=False):
+    def llm_messages(self, with_anchor=False, with_sources=False):
         # The start of the context must stay IDENTICAL from one turn to the next so llama.cpp reuses
         # its cache (otherwise it rereads everything, images included: 20-30 s). So the history is only trimmed
         # and images only dropped in large batches, rarely.
@@ -885,7 +896,7 @@ class Session:
         imgs = [i for h in hist for i in h.get("images", [])]
         k = len(imgs)
         shown = imgs[(((k - RECENT_IMAGES) // 6 + 1) * 6) if k > RECENT_IMAGES else 0:] if vision else []
-        msgs = [{"role": "system", "content": system_prompt() + self.setup_prompt()
+        msgs = [{"role": "system", "content": system_prompt(images=not self.ephemeral) + self.setup_prompt()
                  + ("" if vision else "\nNOTE: you cannot see images in this session; rely on their descriptions.")}]
         selected = set(self.doc_ids())
         for h in hist:
@@ -894,7 +905,8 @@ class Session:
             if h["role"] == "assistant":
                 msgs.append({"role": "assistant", "content": h["text"]})
                 continue
-            content = [{"type": "text", "text": self._scoped_history_text(h, selected)}]
+            used = [] if with_sources else None
+            content = [{"type": "text", "text": self._scoped_history_text(h, selected, used)}]
             for i in h.get("images", []):
                 if i in shown and i in self.images:
                     content += [{"type": "text", "text": f"Image #{i} :"},
@@ -902,9 +914,13 @@ class Session:
                 else:
                     content.append({"type": "text", "text": f"[image #{i}, plus affichee : {self.images.get(i, {}).get('desc', '')[:200]}]"})
             msgs.append({"role": "user", "content": content})
+            if used:
+                msgs[-1]["_sources"] = used
         # the image inventory changes every turn: put it at the END (cache intact)
         if msgs[-1]["role"] == "user":
-            msgs[-1]["content"] = msgs[-1]["content"] + [{"type": "text", "text": self.catalog()}]
+            inventory = self.catalog()
+            if inventory:
+                msgs[-1]["content"] = msgs[-1]["content"] + [{"type": "text", "text": inventory}]
         return (msgs, anchor) if with_anchor else msgs
 
     # -- setup of the conversation (assistant, instructions, knowledge, web, MCP tools)
@@ -916,6 +932,12 @@ class Session:
         import rag
         chosen = set(self.config.get("docs") or []) | set(self.assistant().get("docs") or [])
         return rag.existing_collections(chosen - set(self.config.get("excluded_docs") or []))
+
+    @contextlib.contextmanager
+    def document_scope(self):
+        import workspace
+        with self._storage_lock, workspace.assistant_scope(self.config.get("assistant")):
+            yield self.doc_ids()
 
     def web_on(self):
         return not self.config.get("web_blocked") and bool(self.config.get("web") or self.assistant().get("web"))
@@ -1202,21 +1224,24 @@ class Session:
 
     def ask_llm(self, retry=True, think=None, dry=False):
         import catalog, zlib
+        import rag
         if think is None:  # level chosen in the model menu (if the model can think)
             think = SETTINGS.get("think", "off") if catalog.BY_ID.get(SETTINGS["llm"], {}).get("think") else "off"
         effort, budget = THINK.get(think, THINK["off"])
         kw = {"enable_thinking": bool(effort)} | ({"reasoning_effort": effort} if effort else {})
         model = catalog.BY_ID.get(SETTINGS.get("llm")) or {}
         window = model.get("context") if model.get("cloud") else ACTIVE_CONTEXT or SETTINGS.get("llm_ctx")
-        messages, anchor = self.llm_messages(with_anchor=True)
+        messages, anchor = self.llm_messages(with_anchor=True, with_sources=True)
         messages, max_tokens = turn_runtime.fit(messages, window or 16384, 14000 + budget, anchor)
+        sources = [source for message in messages for source in message.pop("_sources", ())]
         body = {"messages": messages, "temperature": 0.6 if effort else 0.4, "max_tokens": max_tokens,
                 "stream": True, "response_format": {"type": "json_object"}, "chat_template_kwargs": kw}
         if dry:  # llama.cpp anti-repetition, only after a loop (it can hurt legitimately repetitive code)
             body |= {"dry_multiplier": 0.8, "dry_base": 1.75, "dry_allowed_length": 6, "temperature": 0.7}
         t, rs, last, t0, t_rs, chk, looped = "", "", 0.0, time.time(), None, 0, False
         js = {"pos": 0, "depth": 0, "str": False, "esc": False, "done": False}
-        with busy("llm"), contextlib.closing(turn_runtime.stream(lambda: chat_deltas(body, think))) as deltas:
+        with rag.guard_request(sources, self.document_scope), busy("llm"), \
+                contextlib.closing(turn_runtime.stream(lambda: chat_deltas(body, think))) as deltas:
             for piece, reasoning in deltas:
                 t += piece
                 rs += reasoning

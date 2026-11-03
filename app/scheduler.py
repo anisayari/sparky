@@ -8,7 +8,7 @@ Tasks live in data/schedules.json. `when` is one of:
   {"type": "once", "at": epoch seconds}
 Times are local. A run missed while Sparky was off happens once at the next start.
 """
-import datetime, os, threading, time, uuid
+import contextlib, datetime, os, threading, time, uuid
 
 import config
 
@@ -126,6 +126,15 @@ def delete(tid):
         return len(left) != len(tasks)
 
 
+@contextlib.contextmanager
+def workflow_sources(task_id, run_id):
+    """Only the current synthesis run can transmit passages from its assigned collection."""
+    with _lock:
+        task = next((row for row in _load() if row["id"] == task_id), {})
+        run = task.get("run") or {}
+        yield [task["collection"]] if run.get("id") == run_id and run.get("phase") == "summarize" else []
+
+
 def unread():
     """Ids of tasks with a result the user has not opened yet (UI badge)."""
     return [t["id"] for t in list_() if t.get("unread")]
@@ -155,11 +164,43 @@ def review_result(tid, run_id, decision):
         raise ValueError("invalid review decision")
     task = get(tid)
     run = (task or {}).get("run") or {}
+    if run.get("phase") != "review" or run["id"] != run_id:
+        return None
+    if decision == "approved":
+        import workflows
+        if not run.get("digest") or workflows.result_digest(run["session"], run_id) != run["digest"]:
+            return None
     return _update(tid, expected_run=(run_id, "review"), run=run | {"phase": decision, "reviewed": time.time()})
+
+
+def remove_result(sid):
+    with _lock:
+        tasks = _load()
+        changed = False
+        for task in tasks:
+            if task.get("last_session") == sid:
+                task.update(last_session=None, unread=False)
+                if (task.get("run") or {}).get("session") == sid:
+                    task["run"]["phase"] = "removed"
+                changed = True
+        if changed:
+            _save(tasks)
 
 
 def _resuming(t):
     return (t.get("run") or {}).get("phase") in ("search", "summarize")
+
+
+def cancel_workflow(tid, run_id):
+    task = get(tid)
+    if not task or not _resuming(task) or task["run"]["id"] != run_id:
+        return None
+    run = task["run"]
+    once = task["when"]["type"] == "once"
+    enabled = bool(task["enabled"] and not once)
+    return _update(tid, expected_run=(run_id, run["phase"]),
+                   run={"id": run_id, "session": run["session"], "phase": "cancelled"},
+                   enabled=enabled, next_run=next_run(task["when"], time.time()) if enabled else None)
 
 
 def _run(task, runner, due_at=None):
@@ -189,6 +230,10 @@ def _run(task, runner, due_at=None):
                         raise ValueError("Séquence annulée.")
                     run = new
                 sid = workflows.summarize(task, run, checkpoint)
+                digest = workflows.result_digest(sid, run["id"])
+                if not digest:
+                    sid = None
+                    raise ValueError("La synthèse enregistrée est introuvable.")
             elif runner is _runner:
                 sid = runner(task["prompt"], task["title"], task)
             else:
@@ -205,6 +250,8 @@ def _run(task, runner, due_at=None):
                   "next_run": None if once or not cur["enabled"] else next_run(cur["when"], done)}
         if run:
             fields["run"] = {k: run[k] for k in ("id", "session")} | {"phase": "failed" if err else "review"}
+            if sid:
+                fields["run"]["digest"] = digest
         if once:
             fields["enabled"] = False
         if sid:

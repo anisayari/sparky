@@ -75,6 +75,27 @@ def _memory_allowed(epoch):
     return epoch == _memory_epoch and profile()["memory_on"] is True
 
 
+def edit_memory(changes):
+    global _memory_epoch
+    with _memory_lock:
+        if changes.get("delete"):
+            S.delete_memory(int(changes["id"]))
+        elif changes.get("id"):
+            S.update_memory(int(changes["id"]), changes.get("text"), changes.get("category"),
+                            changes.get("importance"), changes.get("pinned"))
+        else:
+            S.add_memory(changes.get("text", ""), changes.get("category", "other"),
+                         int(changes.get("importance") or 4), source="user")
+        _memory_epoch += 1
+
+
+def edit_style(style):
+    global _memory_epoch
+    with _memory_lock:
+        S.set("style", {k: v for k, v in style.items() if v})
+        _memory_epoch += 1
+
+
 def bond():
     b = S.get("bond", {"xp": 0, "days": [], "first": time.time(), "chats": 0})
     lvl = max(i for i, (xp, _) in enumerate(LEVELS) if b["xp"] >= xp)

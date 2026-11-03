@@ -309,6 +309,15 @@ def models(pid):
 
 def stream(meta, messages, max_tokens=8000, think="off", json_mode=False, admission=contextlib.nullcontext):
     """Yields (text, reasoning) pieces. meta: the catalog entry of a cloud model."""
+    import rag
+    documents = rag.admission.get()
+    if documents is not contextlib.nullcontext:
+        previous = admission
+
+        @contextlib.contextmanager
+        def admission():
+            with previous(), documents():
+                yield
     if meta["provider"] == "anthropic":
         yield from _claude_stream(meta, messages, max_tokens, think, admission)
     else:

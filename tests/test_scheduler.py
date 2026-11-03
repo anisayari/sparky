@@ -170,6 +170,27 @@ def test_document_sequence_survives_restart_and_only_reviews_its_own_result(sche
     assert any(e.get("text") == "Orange [1]." for e in saved.events)
     assert not sched.run_now(task["id"], wait=True, runner=lambda *_: None)
     assert not sched.review_result(task["id"], "obsolete", "approved")
+    saved.events.append({"type": "reply", "text": "Changed after review"})
+    saved.save()
+    assert not sched.review_result(task["id"], ready["run"]["id"], "approved")
+    saved.events.pop()
+    saved.save()
     assert sched.review_result(task["id"], ready["run"]["id"], "approved")
     assert not sched.review_result(task["id"], ready["run"]["id"], "approved")
     assert calls == ["search", "summarize"]
+
+
+def test_cancel_a_running_sequence_does_not_create_a_result_or_disable_other_runs(sched, monkeypatch):
+    import workflows
+    task = sched.save_task({"prompt": "summary", "collection": 4, "when": {"type": "interval", "minutes": 60}})
+    def pause(task, run, checkpoint):
+        checkpoint("summarize", sources=[], model="local")
+        assert not sched.cancel_workflow(task["id"], "a previous run")
+        assert sched.cancel_workflow(task["id"], run["id"])
+        checkpoint("summarize", sources=[], model="local")
+        pytest.fail("cancelled step continued")
+    monkeypatch.setattr(workflows, "summarize", pause)
+    sched.run_now(task["id"], wait=True, runner=lambda *_: None)
+    current = sched.get(task["id"])
+    assert current["enabled"] and current["next_run"]
+    assert current["run"]["phase"] == "cancelled" and not current["last_session"]

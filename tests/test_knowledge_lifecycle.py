@@ -174,7 +174,7 @@ def test_navigation_uses_latest_response_and_blocks_sends_until_ready():
     send = html[html.index("async function send(){"):html.index("async function send(){") + 1000]
     assert "classList.contains('loading-chat')" in send
     js = """
-const assert=require('assert/strict'), pending=new Map(), classes=new Set(), seen=[];
+const assert=require('assert/strict'), pending=new Map(), configWrites=new Map(), classes=new Set();
 const document={body:{classList:{add: k=>classes.add(k),remove: k=>classes.delete(k)}}};
 const upd=()=>{}, setEph=()=>{}, resetArts=()=>{}, renderTools=()=>{}, down=()=>{}, loadList=()=>{},
       CFG0=()=>({}), ta={focus(){}}, log={}, localStorage={setItem(){}}, HELLO='';

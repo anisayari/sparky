@@ -4,7 +4,7 @@ Files are read with attach.py (PDFs page by page so each chunk knows its page), 
 embedded with the memory model (e5-small) when it is installed, and stored in data/knowledge.db.
 Search is hybrid (cosine + BM25-like keywords) and falls back to keywords only without the model.
 """
-import hashlib, heapq, json, os, re, sqlite3, threading, time, uuid
+import contextlib, contextvars, hashlib, heapq, json, os, re, sqlite3, threading, time, uuid
 
 import attach
 import config
@@ -17,6 +17,28 @@ _lock = threading.RLock()
 _dispatcher = None
 MAX_PENDING_BYTES = 512 * 2**20
 MAX_PENDING_FILES = 128
+admission = contextvars.ContextVar("rag_request_admission", default=contextlib.nullcontext)
+
+
+@contextlib.contextmanager
+def guard_request(refs, selection):
+    """Bind only this payload's citations; each transport attempt checks them at dispatch."""
+    if not refs:
+        yield
+        return
+
+    @contextlib.contextmanager
+    def admit():
+        with selection() as ids, _lock:
+            if len(live_hits(refs, ids)) != len(refs):
+                raise ValueError("Les sources ont changé avant l’envoi. Relancez la demande.")
+            yield  # the caller releases the locks as soon as it opens the response
+
+    token = admission.set(admit)
+    try:
+        yield
+    finally:
+        admission.reset(token)
 
 
 def _next_id(conn):

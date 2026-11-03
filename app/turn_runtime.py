@@ -147,7 +147,7 @@ def fit(messages, window, max_output, anchor=None):
     if anchor and anchor < len(messages) - 1:
         source = messages[anchor]["content"]
         text = source if isinstance(source, str) else "\n".join(p["text"] for p in source if p.get("type") == "text")
-        request = {"role": "user", "content": clip(text, max(16, budget // 3 - 5))}
+        request = messages[anchor] | {"content": clip(text, max(16, budget // 3 - 5))}
         budget -= message_cost(request)
     latest = dict(messages[-1])
     if message_cost(latest) > budget:
