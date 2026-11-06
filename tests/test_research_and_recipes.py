@@ -143,6 +143,14 @@ def test_research_references_fit_the_actual_model_request(monkeypatch):
         assert f"[{i}] {source['title']}\n{source['text']}" in prompt
 
 
+def test_research_checks_inline_findings_not_model_generated_bibliographies():
+    valid = "## Period\n\nThe period is 12 months. [1]\n\nThe newer version raises it to 24 months. [2]"
+    assert research._cited_findings(valid, 2)
+    assert not research._cited_findings(valid, 1)
+    assert not research._cited_findings("No evidence here.\n\n[1]: https://outside.example/", 1)
+    assert not research._cited_findings("One finding [1].\n\nAn uncited conclusion.", 1)
+
+
 def test_model_comparison_never_calls_cloud_and_releases_worker(monkeypatch):
     from types import SimpleNamespace
     monkeypatch.setitem(catalog.BY_ID, "remote", {"kind":"llm","cloud":True})
