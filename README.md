@@ -101,6 +101,8 @@ choose a local model for offline chat, or explicitly connect a cloud provider an
 
 ## 📸 Screenshots
 
+<p align="center"><img src="docs/demo-contract-1.8.gif" width="900" alt="Sparky compares two sample contracts, shows the warranty change from 12 to 24 months, opens the scanned page and exports the comparison to Word."><br><i>Contract review in Sparky 1.8, recorded locally in French.</i> <a href="docs/demo-contract-1.8.mp4">Watch the MP4</a></p>
+
 | | |
 |---|---|
 | <img src="docs/computer.png" alt="Computer mode with an approval card"><br>💻 **Computer mode** — Sparky reads your files, then asks before writing | <img src="docs/library-video.png" alt="Video models in the library"><br>📦 **Model library** — assistants, images, videos, voice |
