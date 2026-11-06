@@ -176,11 +176,11 @@ def test_navigation_uses_latest_response_and_blocks_sends_until_ready():
     js = """
 const assert=require('assert/strict'), pending=new Map(), configWrites=new Map(), classes=new Set();
 const document={body:{classList:{add: k=>classes.add(k),remove: k=>classes.delete(k)}}};
-const upd=()=>{}, setEph=()=>{}, resetArts=()=>{}, renderTools=()=>{}, down=()=>{}, loadList=()=>{},
+const upd=()=>{}, setEph=()=>{}, stopTimer=()=>{}, $=()=>({}), resetArts=()=>{}, renderTools=()=>{}, down=()=>{}, loadList=()=>{},
       CFG0=()=>({}), ta={focus(){}}, log={}, localStorage={setItem(){}}, HELLO='';
 const fetch=url=>new Promise(resolve=>pending.set(decodeURIComponent(url.split('=')[1]),resolve));
-let open_,busy=false,SID='old',CFG={docs:['old']},T,UIDX,VERS,TBASE;
-const answer=(id)=>pending.get(id)({ok:true,json:async()=>({config:{docs:[id]},events:[]})});
+let open_,busy=false,SID='old',CFG={docs:['old']},T,UIDX,VERS,TBASE,lastUser,activeTurn;
+const answer=(id)=>pending.get(id)({ok:true,json:async()=>({id,config:{docs:[id]},events:[]})});
 """ + nav + """
 (async()=>{const first=open_('A'),second=open_('B');assert(classes.has('loading-chat'));assert.equal(SID,'old');
 answer('B');await second;answer('A');await first;assert(!classes.has('loading-chat'));

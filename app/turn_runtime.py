@@ -4,6 +4,48 @@ import contextvars
 import queue
 import socket
 import threading
+from collections import deque
+
+
+class TurnFeed:
+    """A short, read-only tail of the current turn. Old cursors recover from the authoritative transcript."""
+
+    def __init__(self):
+        self.changed = threading.Condition()
+        self.turn_id = None
+        self.running = False
+        self.cursor = 0
+        self.tail = deque(maxlen=48)
+        self.partial = None
+
+    def begin(self, turn_id):
+        with self.changed:
+            self.turn_id = turn_id
+            self.cursor = 0
+            self.tail.clear()
+            self.partial = None
+            self.running = True
+            self.changed.notify_all()
+
+    def publish(self, event, persistent=False):
+        with self.changed:
+            self.cursor += 1
+            self.tail.append((self.cursor, event))
+            self.partial = None if persistent else event
+            if event["type"] == "done":
+                self.running = False
+                self.partial = None
+                # Release transient token snapshots as soon as the transcript is complete.
+                self.tail.clear()
+                self.tail.append((self.cursor, event))
+            self.changed.notify_all()
+
+    def poll(self, turn_id, after, timeout=12):
+        with self.changed:
+            self.changed.wait_for(lambda: (turn_id != self.turn_id or after != self.cursor or not self.running), timeout)
+            if turn_id != self.turn_id or after > self.cursor or (self.tail and after < self.tail[0][0] - 1):
+                return {"reset": True}
+            return {"cursor": self.cursor, "running": self.running, "events": [e for seq, e in self.tail if seq > after]}
 
 
 class Cancelled(Exception):

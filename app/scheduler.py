@@ -106,11 +106,20 @@ def save_task(task, now=None):
         collection = task.get("collection", t.get("collection"))
         if collection is not None and type(collection) is not int:
             raise ValueError("collection must be an identifier")
+        documents = task.get("compare_documents", t.get("compare_documents", []))
+        if (not isinstance(documents, list) or (documents and
+                (collection is None or len(documents) != 2 or any(type(i) is not int for i in documents)
+                 or documents[0] == documents[1]))):
+            raise ValueError("Sélectionne deux versions distinctes dans la même collection.")
+        if documents:
+            import document_diff
+            document_diff.validate(collection, documents)
         model = task.get("model", t.get("model"))
         if model is not None and not isinstance(model, str):
             raise ValueError("invalid model")
         t.update(title=(task.get("title") or prompt[:60]).strip(), prompt=prompt, when=when,
-                 enabled=bool(task.get("enabled", True)), web=web, model=model or None, collection=collection)
+                 enabled=bool(task.get("enabled", True)), web=web, model=model or None, collection=collection,
+                 compare_documents=documents)
         t["next_run"] = next_run(when, now) if t["enabled"] else None
         if not old:
             tasks.append(t)

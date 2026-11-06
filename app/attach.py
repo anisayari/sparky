@@ -247,20 +247,9 @@ def _office_text(ext, names, read_xml):
 
 
 def _pdf(data):
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        raise RuntimeError("lecture des PDF indisponible (relance l'installation)") from None
-    r = PdfReader(io.BytesIO(data))
-    pages = []
-    for i, p in enumerate(r.pages):
-        pages.append(f"--- Page {i + 1} ---\n" + (p.extract_text() or "").strip())
-        if sum(len(x) for x in pages) > MAX_CHARS * 1.2:
-            break
-    text = "\n\n".join(pages)
-    if not re.sub(r"--- Page \d+ ---|\s", "", text):
-        raise RuntimeError("PDF scanné sans texte (images seulement)")
-    return text
+    import pdf_text
+    return "\n\n".join(f"--- Page {page}{' · OCR' if ocr else ''} ---\n{text}"
+                       for page, text, ocr in pdf_text.pages(data, MAX_CHARS + 1))
 
 
 def _audio(data):

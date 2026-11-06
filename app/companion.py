@@ -49,6 +49,8 @@ def update_profile(changes):
         for key in ("memory_on", "local_only"):
             if key in changes and type(changes[key]) is not bool:
                 raise ValueError(f"{key} must be true or false")
+            if key in changes and changes.get("expected", {}).get(key, p[key]) != p[key]:
+                raise ConsentChanged
         if changes.get("memory_on", p["memory_on"]) != p["memory_on"]:
             if changes["memory_on"]:
                 recent = S.messages(1)
@@ -76,13 +78,19 @@ def _memory_allowed(epoch):
 
 
 def edit_memory(changes):
-    global _memory_epoch
+    global _memory_epoch, _last_forget_epoch
     with _memory_lock:
+        if changes.get("keep"):
+            S.set("forget_requests", [i for i in S.get("forget_requests", []) if i != int(changes["id"])])
+            return
         if changes.get("delete"):
-            S.delete_memory(int(changes["id"]))
+            if not S.forget_memory(int(changes["id"])):
+                return
+            _last_forget_epoch = _memory_epoch + 1
+            state["last_ops"] = None
         elif changes.get("id"):
             S.update_memory(int(changes["id"]), changes.get("text"), changes.get("category"),
-                            changes.get("importance"), changes.get("pinned"))
+                            changes.get("importance"), changes.get("pinned"), manual=True)
         else:
             S.add_memory(changes.get("text", ""), changes.get("category", "other"),
                          int(changes.get("importance") or 4), source="user")
@@ -200,6 +208,7 @@ def system_prompt(query):
         lines.append("Summary of your earlier conversations: " + summary)
     if checkin:
         lines.append("Something you planned to follow up on (bring it up only if it fits): " + checkin)
+    lines.append("To forget a fact, the user confirms its removal in the Memory panel. Do not promise deletion before confirmation.")
     lines.append("Write like a friend texting: natural, short paragraphs, no headings, at most one question per message. "
                  f"Reply in {user_lang()} (the user's language). If the user asks what you remember, be transparent and "
                  "remind them they can see and edit everything in the Memory tab.")
@@ -208,25 +217,27 @@ def system_prompt(query):
 
 def user_lang():
     """Language the user actually writes in (last messages), else the interface language."""
-    recent = " ".join(m["text"] for m in S.messages(12) if m["role"] == "user")[-1500:]
+    recent = " ".join(m["text"] for m in S.messages(12, after=S.get("context_after", 0)) if m["role"] == "user")[-1500:]
     return harness.detect_lang(recent) or harness.detect_lang(recent, weak=True) or \
         ("French" if harness.SETTINGS.get("ui_lang") == "fr" else "English")
 
 
 def history():
-    return [{"role": m["role"], "content": m["text"]} for m in S.messages(CONTEXT_MSGS)]
+    return [{"role": m["role"], "content": m["text"]} for m in S.messages(CONTEXT_MSGS, after=S.get("context_after", 0))]
 
 
-def chat(text, emit):
+def chat(text, emit, *, voice_local=False):
     """One exchange: stream the reply, then learn from it in the background."""
     with _lock:
         state["busy"] = True
         try:
             with _memory_lock:
                 epoch = _memory_epoch
+                if voice_local and not profile()["local_only"]:
+                    raise ValueError("Activez le mode local du compagnon pour l’appel vocal.")
                 if profile()["local_only"] and harness.cloud_model():
                     raise ValueError("Compagnon local uniquement. Sélectionnez un modèle local.")
-                S.add_message("user", text)
+                user_id = S.add_message("user", text)
                 sysp, mems = system_prompt(text)
             emit({"type": "context", "memories": mems})
             reply = _dispatch(epoch, [{"role": "system", "content": sysp}] + history(), max_tokens=900,
@@ -246,7 +257,7 @@ def chat(text, emit):
             state["busy"] = False
             state["last_activity"] = time.time()
     if _memory_allowed(epoch):
-        threading.Thread(target=learn, args=(text, reply, epoch), daemon=True).start()
+        threading.Thread(target=learn, args=(text, reply, epoch, user_id), daemon=True).start()
     return reply
 
 
@@ -266,7 +277,7 @@ Return ONLY JSON: {"add":[{"text":"...","category":"identity|preference|project|
 "update":[{"id":0,"text":"...","importance":3}],"delete":[0],"style":{},"mood":"one word or empty"}"""
 
 
-def learn(user_text, reply, epoch=None):
+def learn(user_text, reply, epoch=None, message_id=None):
     try:
         with _memory_lock:
             epoch = _memory_epoch if epoch is None else epoch
@@ -282,14 +293,14 @@ def learn(user_text, reply, epoch=None):
         ops = _dispatch(epoch, messages, json_mode=True, max_tokens=700, temperature=0.2)
         with _memory_lock:
             if ops is not None and _memory_allowed(epoch):
-                _apply_learning(ops, user_text, reply)
+                _apply_learning(ops, user_text, reply, message_id, {m["id"] for m in related})
     except Exception as e:
         with _memory_lock:
             if _memory_allowed(epoch):
                 state["last_ops"] = {"error": str(e), "ts": time.time()}
 
 
-def _apply_learning(ops, user_text, reply):
+def _apply_learning(ops, user_text, reply, message_id=None, related_ids=None):
     done = {"add": [], "update": [], "delete": [], "style": {}, "mood": ops.get("mood") or ""}
     mems = {m["id"]: m for m in S.memories()}
 
@@ -307,10 +318,17 @@ def _apply_learning(ops, user_text, reply):
         near = S.nearest(text)
         if near and near[1] >= DUP:  # already known (same fact, other words): nothing to add
             return
-        i = S.add_memory(text, category, importance)
+        i = S.add_memory(text, category, importance, message_id=message_id)
         if i:
             done["add"].append({"id": i, "text": text})
 
+    # Only the owner can approve clearing derived data. An extractor can propose facts it actually saw.
+    known = set(mems) if related_ids is None else related_ids & mems.keys()
+    forgotten = [mid for mid in ops.get("delete") or [] if type(mid) is int and mid in known]
+    if forgotten:
+        S.set("forget_requests", sorted(set(S.get("forget_requests", [])) | set(forgotten)))
+        state["last_ops"] = {"forget_requests": forgotten, "ts": time.time()}
+        return
     for a in ops.get("add") or []:
         if isinstance(a, dict) and a.get("text"):
             add(a["text"], a.get("category", "other"), int(a.get("importance") or 3))
@@ -318,7 +336,7 @@ def _apply_learning(ops, user_text, reply):
         if not (isinstance(u, dict) and u.get("id") in mems and u.get("text")):
             continue
         old, new = mems[u["id"]]["text"], u["text"].strip()
-        if new == old:
+        if new == old or not from_user(new) or mems[u["id"]]["source"] == "user" or mems[u["id"]]["pinned"]:
             continue
         # guard-rails: an update must stay ONE fact about the SAME thing, otherwise the old memory is kept
         if len(new) > 2 * len(old) + 80 or new.count(". ") >= 2:
@@ -326,13 +344,8 @@ def _apply_learning(ops, user_text, reply):
         if S.similarity(old, new) < SAME:
             add(new, mems[u["id"]]["category"], int(u.get("importance") or mems[u["id"]]["importance"]))
             continue  # different fact: stored as a new memory instead of overwriting
-        S.update_memory(u["id"], new, importance=u.get("importance"))
+        S.update_memory(u["id"], new, importance=u.get("importance"), message_id=message_id)
         done["update"].append({"id": u["id"], "text": new})
-    known = set(mems)
-    for d in ops.get("delete") or []:
-        if d in known:
-            S.delete_memory(d)
-            done["delete"].append(d)
     if isinstance(ops.get("style"), dict) and ops["style"]:
         st = S.get("style", {})
         st.update({k: str(v) for k, v in ops["style"].items() if v})
@@ -362,7 +375,7 @@ def reflect(force=False):
         if not p["memory_on"] or state["reflecting"] or state["busy"] or (p["local_only"] and harness.cloud_model()):
             return False
         since = max(S.get("reflected_upto", 0), p.get("memory_after", 0))
-        msgs = S.messages(80, after=since)
+        msgs = S.next_messages(since, 80)
         if not msgs or (len(msgs) < 4 and not force):
             return False
         epoch = _memory_epoch
@@ -375,7 +388,7 @@ def reflect(force=False):
     try:
         r = _dispatch(epoch, messages, json_mode=True, max_tokens=1200, temperature=0.4)
         with _memory_lock:
-            if r is None or not _memory_allowed(epoch):
+            if not isinstance(r, dict) or not r or not _memory_allowed(epoch):
                 return False
             return _apply_reflection(r, mems, msgs)
     finally:
@@ -384,16 +397,16 @@ def reflect(force=False):
 
 
 def _apply_reflection(r, mems, msgs):
-    known = {m["id"] for m in mems}
+    known = {m["id"] for m in mems if m["source"] != "user" and not m["pinned"]} - set(S.get("forget_requests", []))
     texts = {m["id"]: m["text"] for m in mems}
     for g in r.get("merge") or []:
-        ids = [i for i in g.get("ids", []) if i in known]
+        ids = list(dict.fromkeys(i for i in g.get("ids", []) if type(i) is int and i in known))
         # only merge memories that really talk about the same thing, into one fact
         ids = [ids[0]] + [i for i in ids[1:] if S.similarity(texts[ids[0]], texts[i]) >= SAME] if ids else []
         if len(ids) >= 2 and g.get("text") and g["text"].count(". ") < 2:
             S.update_memory(ids[0], g["text"])
             for i in ids[1:]:
-                S.delete_memory(i)
+                S.delete_memory(i, merge_into=ids[0])
                 known.discard(i)
     for i in r.get("delete") or []:
         if i in known:
@@ -460,7 +473,7 @@ def snapshot():
             "bond": b, "style": S.get("style", {}), "mood": S.get("mood", ""), "memories": S.memories(),
             "journal": S.journal(), "summary": S.get("summary", ""), "checkin": S.get("checkin", ""),
             "messages": S.messages(60), "busy": state["busy"], "reflecting": state["reflecting"],
-            "last_ops": state["last_ops"], "embeddings": memory.EMB.ready()}
+            "last_ops": state["last_ops"], "forget_requests": S.get("forget_requests", []), "embeddings": memory.EMB.ready()}
 
 
 threading.Thread(target=idle_loop, daemon=True).start()

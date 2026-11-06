@@ -312,13 +312,15 @@ def pdf_text(data, max_chars=20000):
     return str(title), "\n\n".join(parts).strip()
 
 
-def _download(url, data=None, headers=None, private_origin=None):
+def _download(url, data=None, headers=None, private_origin=None, allowed_hosts=None):
     """Read bounded responses over direct, pinned connections; validate every redirect before opening it."""
     request_headers = {**HEADERS, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json;q=0.9,*/*;q=0.8",
                        **(headers or {})}
     for _ in range(MAX_HOPS + 1):
         u = urllib.parse.urlsplit(url)
         origin = _origin(u)
+        if allowed_hosts is not None and origin[1].lower() not in allowed_hosts:
+            raise ValueError("Ce site ne figure pas dans les sources autorisées.")
         addresses = _addresses(origin[1], origin[2], allow_private=origin == private_origin)
         path = urllib.parse.urlunsplit(("", "", u.path or "/", u.query, ""))
         with closing(_connect(origin, addresses)) as conn:
@@ -335,9 +337,9 @@ def _download(url, data=None, headers=None, private_origin=None):
     raise ValueError("too many redirects")
 
 
-def fetch(url, max_chars=20000):
+def fetch(url, max_chars=20000, *, allowed_hosts=None):
     """{url, title, text} of a public web page, PDF, text or JSON document (text cut at max_chars)."""
-    url, ctype, charset, data = _download(url)
+    url, ctype, charset, data = _download(url) if allowed_hosts is None else _download(url, allowed_hosts=allowed_hosts)
     if ctype == "application/pdf" or data[:5] == b"%PDF-":
         title, text = pdf_text(data, max_chars)
     else:
