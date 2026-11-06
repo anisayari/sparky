@@ -19,10 +19,12 @@ import harness
 import local_access
 import localscan
 import mcp
+import model_compare
 import openai_api
 import process_owner
 import rag
 import rag_sync
+import research
 import scheduler
 import studio
 import syscheck
@@ -351,14 +353,21 @@ def wait_llm(emit):
     """The assistant is paused for a Studio video or reloading after it: wait (with a status) instead of failing."""
     t0 = time.time()
     while (llm_state.get("paused") or (switch["phase"] == "loading" and switch["kind"] == "llm")) and time.time() - t0 < 900:
+        harness.turn_runtime.check()
         emit({"type": "status", "text": "l'assistant est en pause pendant une vidéo du Studio, il revient juste après"
               if llm_state.get("paused") else "rechargement de l'assistant"})
         time.sleep(3)
     while switch["phase"] == "loading" and time.time() - t0 < 900:
+        harness.turn_runtime.check()
         time.sleep(1)
 
 
 def apply_config(s, new):
+    if "docs_only" in new:
+        s.config["docs_only"] = new["docs_only"] is True
+    if "project_space" in new:
+        project = workspace.project(new["project_space"])
+        s.config["project_space"] = project["id"] if project else None
     if "assistant" in new:
         s.config["assistant"] = new["assistant"] or None
     if isinstance(new.get("system"), str):
@@ -613,6 +622,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(200, f.read(), (mimetypes.guess_type(name)[0] or "application/octet-stream")
                       + ("; charset=utf-8" if name.endswith((".js", ".css")) else ""), [("Cache-Control", "max-age=86400")])
 
+    def ui_script(self, path):
+        name = path.removeprefix("/ui/")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*\.js", name):
+            return self.send(404, {"error": "introuvable"})
+        try:
+            with open(os.path.join(HERE, "ui", name), "rb") as f:
+                self.send(200, f.read(), "text/javascript; charset=utf-8")
+        except FileNotFoundError:
+            self.send(404, {"error": "introuvable"})
+
     def logo(self, path):
         with open(os.path.join(HERE, "logo.png"), "rb") as f:
             self.send(200, f.read(), "image/png")
@@ -623,8 +642,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def state(self, path):
         s = get_session(self.query().get("id"))
-        self.send(200, {"id": s.id, "events": s.events, "turns": len(s.turns), "versions": s.versions(), "config": s.config,
-                        "meta": s.meta, "busy": s.lock.locked()} if s else {"id": None, "events": []})
+        if not s:
+            return self.send(200, {"id": None, "events": []})
+        with s.feed.changed:
+            events = list(s.events)
+            turn = {"id": s.feed.turn_id, "cursor": s.feed.cursor, "running": s.feed.running, "partial": s.feed.partial}
+            visible_turns = sum(start < len(events) for _, start in s.turns)
+            state = {"id": s.id, "turns": visible_turns, "versions": s.versions(), "config": dict(s.config),
+                     "meta": dict(s.meta), "busy": s.lock.locked(), "turn": turn, "ephemeral": s.ephemeral}
+        with s._computer_lock:
+            state["pendingApprovals"] = [aid for aid, card in s._approvals.items() if not card["event"].is_set()]
+        self.send(200, state | {"events": s.visible_events(events)})
+
+    def turn_events(self, path):
+        query = self.query()
+        s = get_session(query.get("id"))
+        if not s:
+            return self.send(404, {"error": "Conversation introuvable."})
+        try:
+            after = int(query.get("after", ""))
+            if after < 0 or not query.get("turnId"):
+                raise ValueError
+        except ValueError:
+            return self.send(400, {"error": "Curseur invalide."})
+        page = s.feed.poll(query["turnId"], after)
+        if "events" in page:
+            page["events"] = s.visible_events(page["events"])
+        self.send(200, page)
+
+    def bot_memory_source(self, path):
+        import companion
+        try:
+            result = companion.S.origins(int(self.query().get("id", "")))
+        except ValueError:
+            result = None
+        self.send(200 if result else 404, (result | {"forgetImpact": companion.S.forget_impact()}) if result
+                  else {"error": "Souvenir introuvable."})
 
     def image(self, path):  # /api/img/<session>/<n>
         try:
@@ -682,6 +735,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 break
         self.send(200, out)
 
+    def document_page(self, path):
+        import pdf_text
+        query = self.query()
+        session = get_session(query.get("id"))
+        if not session:
+            return self.send(404, {"error": "Conversation introuvable."})
+        try:
+            ref = {key: int(query[key]) for key in ("collection_id", "doc_id", "chunk_id")}
+            ref["revision"] = query["revision"]
+        except (KeyError, ValueError):
+            return self.send(400, {"error": "Citation invalide."})
+        if not pdf_text.preview_lock.acquire(blocking=False):
+            return self.send(429, {"error": "Autre page en cours de lecture. Réessayez."})
+        try:
+            with session.document_scope() as selected:
+                page = rag.original_page(ref, selected)
+            if page is None:
+                return self.send(404, {"error": "Cette page ne fait plus partie des documents sélectionnés."})
+            image = pdf_text.page_image(page["body"], page["page"])
+            with session.document_scope() as selected:
+                if not rag.live_hits([ref], selected):
+                    return self.send(404, {"error": "Source retirée."})
+            self.send(200, image, "image/png")
+        finally:
+            pdf_text.preview_lock.release()
+
+    def office(self, path):
+        import office_export
+        body = self.body()
+        try:
+            fmt = body.get("format") if isinstance(body, dict) else None
+            if not isinstance(fmt, str):
+                raise ValueError("Format Office invalide.")
+            data = office_export.render(fmt, body.get("text"))
+        except ValueError as exc:
+            return self.send(400, {"error": str(exc)})
+        self.send(200, data, office_export.MIME[fmt], [("Content-Disposition", f'attachment; filename="Sparky.{fmt}"')])
+
     def export(self, path):  # one conversation as JSON (with its images) or Markdown
         q = self.query()
         s = get_session(q.get("id"))
@@ -731,8 +822,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "api": openai_api.settings() | {"url": f"http://127.0.0.1:{config.APP_PORT}/v1",
                                                              "model": llm_state["name"]},
                             "schedules": scheduler.list_(), "unread": scheduler.unread(),
-                            "task_models": [{"id": mid, "label": LLMS[mid]["label"]} for mid in installed_llms()],
+                            "task_models": [{"id": mid, "label": LLMS[mid]["label"], "cloud": bool(LLMS[mid].get("cloud"))}
+                                            for mid in installed_llms()],
                             "settings": {k: harness.SETTINGS.get(k) for k in ("custom", "searx", "mcp_on")}})
+
+    def research_state(self, path):
+        try:
+            self.send(200, research.state(self.query().get("id")))
+        except ValueError as exc:
+            self.send(404, {"error": str(exc)})
+
+    def workbench_action(self, path):
+        if int(self.headers.get("Content-Length") or 0) > 512 * 1024:
+            return self.send(413, {"error": "Demande trop grande."})
+        try:
+            data = self.body()
+            if not isinstance(data, dict):
+                raise ValueError("Demande invalide.")
+            if path == "/api/compare":
+                result = model_compare.answer(data.get("model"), data.get("messages"))
+            elif data.get("action") == "draft":
+                result = research.draft(data.get("question"))
+            elif data.get("action") == "start":
+                result = research.start(data.get("id"), data)
+            elif data.get("action") == "delete":
+                research.remove(data.get("id"))
+                result = {"ok": True}
+            else:
+                raise ValueError("Action de recherche inconnue.")
+            self.send(200, result)
+        except (ValueError, RuntimeError, OSError) as exc:
+            self.send(400, {"error": str(exc)})
 
     def studio_lib(self, path):
         q = self.query()
@@ -774,14 +894,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def bot_state(self, path):
         import companion
-        e5 = catalog.BY_ID["e5-small"]
-        if not catalog.installed(e5) and catalog.jobs.get("e5-small", {}).get("state") != "running":
-            catalog.install("e5-small")  # memory search model (0.5 GB), downloaded on first use
-        self.send(200, companion.snapshot() | {"embedJob": catalog.jobs.get("e5-small")})
+        embedder = companion.memory.EMB
+        self.send(200, companion.snapshot() | {"embedJob": catalog.jobs.get("e5-small"),
+                    "embedRuntime": embedder.has_runtime(), "embedError": bool(embedder.load_error)})
 
     def voice(self, path):
+        import memory
         m, ready = voice_model()
-        self.send(200, {"id": m["id"], "label": m["label"], "size_gb": m["size_gb"], "ready": ready, "job": catalog.jobs.get(m["id"])})
+        active = LLMS.get(llm_state.get("name")) or {}
+        self.send(200, {"id": m["id"], "label": m["label"], "size_gb": m["size_gb"], "ready": ready,
+                        "runtime": memory.Embedder.has_runtime(),
+                        "localModel": bool(active and not active.get("cloud")), "job": catalog.jobs.get(m["id"])})
 
     def attach_status(self, path):
         st = attach.status(self.query().get("id", ""))
@@ -852,9 +975,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(changes, dict):
             # Older tabs sent their entire snapshot even when editing an unrelated preference.
             return self.send(409, {"error": "Recharge cet onglet avant de modifier les autorisations."})
-        if set(changes) - {"assistant", "system", "web", "web_blocked", "computer", "document_choice"}:
+        if set(changes) - {"assistant", "system", "web", "web_blocked", "computer", "document_choice", "project_space", "docs_only"}:
             return self.send(400, {"error": "Un réglage documentaire modifie une seule collection à la fois."})
         with s._storage_lock:
+            if changes.get("project_space") and not workspace.project(changes["project_space"]):
+                return self.send(404, {"error": "Ce projet a été supprimé."})
             if "document_choice" in changes:
                 choice = changes["document_choice"]
                 if (set(changes) != {"document_choice"} or not isinstance(choice, dict) or
@@ -867,7 +992,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 excluded = set(s.config.get("excluded_docs") or []) - {cid}
                 if not enable:
                     excluded.add(cid)
-                elif cid not in (s.assistant().get("docs") or []):
+                elif cid not in s.inherited_docs():
                     docs.add(cid)
                 changes = {"docs": sorted(docs), "excluded_docs": sorted(excluded)}
             apply_config(s, changes)
@@ -932,7 +1057,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         b = self.body()
         what, act = b.get("what"), b.get("action", "save")
         try:
-            if what in ("assistants", "prompts"):
+            if what in ("assistants", "prompts", "projects"):
                 if act == "delete":
                     workspace.delete(what, b.get("id"))
                     return self.send(200, {"ok": True})
@@ -1002,6 +1127,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         text = b.get("text", "")[:20000]
         vid = tts.pick_voice(tts.norm_lang(b.get("lang")) or tts.guess_lang(text), b.get("voice"))
         if not tts.ready(vid):  # first use of this language: its voice (~60 MB) is downloaded
+            if b.get("download") is False:
+                return self.send(409, {"error": "Installez la voix dans les préférences de l’espace de travail."})
             tts.install(vid)
             return self.send(409, {"error": "voix en cours de téléchargement", "voice": vid, "job": tts.jobs.get(vid)})
         try:
@@ -1174,6 +1301,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def chat(self, path):
         b = self.body()
+        expected_model = harness.SETTINGS.get("llm") or ""
         s = get_session(b.get("id"))
         if s and s.meta.get("workflow_run"):
             return self.send(409, {"error": "Synthèse en lecture seule. Créez une discussion depuis ce message."})
@@ -1185,27 +1313,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 sessions[s.id] = s
         emit = self.stream()
         emit({"type": "ack", "id": s.id, "busy": s.lock.locked()})  # received by the server
-        wait_llm(emit)
-        if not llm_state["name"]:
-            emit({"type": "error", "text": NO_ASSISTANT})
-            emit({"type": "done"})
-            return
+        def prepare(deliver):
+            wait_llm(deliver)
+            if not llm_state["name"]:
+                raise RuntimeError(NO_ASSISTANT)
         uploads = [decode_image(u).convert("RGB") for u in b.get("images", [])]
         mask = decode_image(b["mask"]).convert("RGB") if b.get("mask") else None
         s.turn(b.get("text", ""), uploads, mask, b.get("maskFor"), emit, files=attach.take(b.get("files")),
-               turn_id=b.get("turnId"))
+               turn_id=b.get("turnId"), expected_model=expected_model, prepare=prepare)
 
     def bot(self, path):
         """Sparky Bot: companion with long-term memory (see companion.py)."""
         import companion
         action, b = path[len("/api/bot/"):], self.body()
-        if action in ("chat", "greet"):
+        if action in ("chat", "greet", "voice"):
             if not llm_state["name"]:
                 return self.send(409, {"error": NO_ASSISTANT})
+            if action == "voice":
+                model = LLMS.get(llm_state["name"]) or {}
+                if not model or model.get("cloud") or model["id"] != harness.SETTINGS.get("llm"):
+                    return self.send(409, {"error": "Sélectionnez un modèle local pour l’appel vocal."})
+                if not companion.profile()["local_only"]:
+                    return self.send(409, {"error": "Activez le mode local du compagnon pour l’appel vocal."})
             emit = self.stream()
             try:
                 if action == "chat":
                     companion.chat((b.get("text") or "").strip(), emit)
+                elif action == "voice":
+                    binding = harness.required_model.set(model["id"])
+                    try:
+                        companion.chat((b.get("text") or "").strip(), emit, voice_local=True)
+                    finally:
+                        harness.required_model.reset(binding)
                 else:
                     t = companion.greeting(emit)
                     emit({"type": "reply", "text": t, "bond": companion.bond()} if t else {"type": "noop"})
@@ -1218,7 +1357,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif action == "style":
             companion.edit_style(b.get("style") or {})
         elif action == "profile":
-            companion.update_profile(b)
+            privacy_keys = {"memory_on", "local_only"} & b.keys()
+            if privacy_keys and any(k in b for k in ("name", "persona", "custom")) and not isinstance(b.get("expected"), dict):
+                return self.send(409, {"error": "Rechargez les réglages du compagnon."})
+            try:
+                companion.update_profile(b)
+            except companion.ConsentChanged:
+                return self.send(409, {"error": "Les autorisations du compagnon ont changé. Vérifiez les réglages actuels."})
         elif action == "reflect":
             return self.send(200, {"ok": companion.reflect(force=True)})
         elif action == "forget":
@@ -1230,7 +1375,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 _json = lambda f: lambda h, p: h.send(200, f())  # noqa: E731  routes that only return data
 GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo, "/api/health": Handler.health,
+       "/api/document-page": Handler.document_page,
+       "/api/research": Handler.research_state,
        "/api/instance": _json(lambda: {"instance": _instance_id}),
+       "/api/turn/events": Handler.turn_events, "/api/bot/memory-source": Handler.bot_memory_source,
        "/api/metrics": _json(metrics), "/api/sessions": _json(harness.Session.list_all), "/api/state": Handler.state,
        "/api/projzip": Handler.projzip, "/api/settings": Handler.settings, "/api/syscheck": _json(syscheck.current),
        "/api/bot": Handler.bot_state, "/api/voice": Handler.voice, "/api/localscan": _json(localscan.status),
@@ -1239,8 +1387,10 @@ GET = {"/": Handler.page, "/index.html": Handler.page, "/logo.png": Handler.logo
        "/api/hf/search": Handler.hf, "/api/hf/files": Handler.hf, "/api/search": Handler.search_chats,
        "/api/export": Handler.export, "/api/workspace": Handler.workspace_get, "/api/tts": Handler.tts_status,
        "/api/studio": Handler.studio_lib}
-GET_PREFIX = [("/api/img/", Handler.image), ("/vendor/", Handler.vendor), ("/api/studio/file/", Handler.studio_file)]
+GET_PREFIX = [("/api/img/", Handler.image), ("/vendor/", Handler.vendor), ("/ui/", Handler.ui_script), ("/api/studio/file/", Handler.studio_file)]
 POST = {"/api/new": Handler.new_session, "/api/delete": Handler.delete_session, "/api/install": Handler.install,
+        "/api/office": Handler.office,
+        "/api/research": Handler.workbench_action, "/api/compare": Handler.workbench_action,
         "/api/turn/cancel": Handler.cancel_turn, "/api/fork": Handler.fork_chat,
         "/api/syscheck": Handler.rescan, "/api/projrun": Handler.projrun, "/api/onboarded": Handler.onboarded,
         "/api/use": Handler.use, "/api/restart": Handler.restart,"/api/attach": Handler.attach_add, "/api/cloud/key": Handler.cloud_key,
@@ -1334,7 +1484,10 @@ def main():
         try:
             _serve(a, ui, preview, stop_requested)
         finally:
-            _engines.close()
+            try:
+                model_compare.shutdown()
+            finally:
+                _engines.close()
 
 
 def _serve(a, ui, preview, stop_requested):

@@ -40,6 +40,7 @@ def _load():
         d = {k: [dict(x) | (EXAMPLES_EN.get(x["id"], {}) if en else {}) for x in v] for k, v in EXAMPLES.items()}
     d.setdefault("assistants", [])
     d.setdefault("prompts", [])
+    d.setdefault("projects", [])
     return d
 
 
@@ -57,7 +58,49 @@ def assistant_scope(aid):
     return _lock if aid else contextlib.nullcontext()
 
 
+def project(pid):
+    return next((p for p in get()["projects"] if p["id"] == pid), None) if pid else None
+
+
+@contextlib.contextmanager
+def guard_project(session, snapshot):
+    """Confirm inherited instructions still belong to this chat at every provider dispatch."""
+    if not snapshot:
+        yield
+        return
+    import rag
+    previous = rag.admission.get()
+
+    @contextlib.contextmanager
+    def admit():
+        with session._storage_lock, _lock:
+            selected = project(session.config.get("project_space"))
+            if not selected or (selected["id"], selected["revision"]) != snapshot:
+                raise ValueError("Le projet a changé avant l’envoi. Relancez la demande.")
+            with previous():
+                yield
+
+    token = rag.admission.set(admit)
+    try:
+        yield
+    finally:
+        rag.admission.reset(token)
+
+
 def _clean(kind, item):
+    if kind == "projects":
+        import rag
+        name = str(item.get("name") or "").strip()[:80]
+        if not name:
+            raise ValueError("Nom du projet manquant.")
+        docs = item.get("docs", [])
+        if not isinstance(docs, list) or any(type(cid) is not int for cid in docs):
+            raise ValueError("Collections du projet invalides.")
+        existing = rag.existing_collections(docs)
+        if set(existing) != set(docs):
+            raise ValueError("Une collection du projet a été supprimée.")
+        return {"name": name, "system": str(item.get("system") or "").strip()[:8000],
+                "docs": existing, "revision": uuid.uuid4().hex}
     if kind == "assistants":
         name = str(item.get("name") or "").strip()[:60]
         if not name:
@@ -72,17 +115,19 @@ def _clean(kind, item):
 
 def save(kind, item):
     """Creates or updates an assistant / prompt; returns its id."""
-    if kind not in ("assistants", "prompts"):
+    if kind not in ("assistants", "prompts", "projects"):
         raise ValueError("type inconnu")
     with _lock:
         d = _load()
         row = _clean(kind, item) | {"updated": time.time()}
         old = next((x for x in d[kind] if x["id"] == item.get("id")), None)
+        if kind == "projects" and item.get("id") and (not old or old["revision"] != item.get("revision")):
+            raise ValueError("Le projet a changé. Rouvrez-le avant de modifier ses réglages.")
         if old:
             old.update(row)
             rid = old["id"]
         else:
-            rid = uuid.uuid4().hex[:8]
+            rid = uuid.uuid4().hex if kind == "projects" else uuid.uuid4().hex[:8]
             d[kind].append({"id": rid} | row)
         config.write_json(FILE, d)
         return rid

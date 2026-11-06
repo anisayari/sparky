@@ -6,6 +6,9 @@ numpy==2.4.6; python_version == "3.11"
 numpy==2.2.6; python_version == "3.10"
 websocket-client==1.9.2
 pypdf==6.20.1
+pypdfium2==5.14.0
+python-docx==1.2.0
+XlsxWriter==3.3.1
 anthropic==1.13.0
 onnxruntime==1.31.0; python_version >= "3.11"
 onnxruntime==1.23.2; python_version == "3.10"

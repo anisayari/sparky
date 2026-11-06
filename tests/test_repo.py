@@ -45,6 +45,10 @@ def test_page_script_parses():
         r = subprocess.run([node, "-e", "new Function(require('fs').readFileSync(0, 'utf8'))"], input=js,
                            capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr
+    directory = os.path.join(ROOT, "app", "ui")
+    for name in os.listdir(directory):
+        if name.endswith(".js"):
+            subprocess.run([node, "--check", os.path.join(directory, name)], check=True, capture_output=True)
 
 
 def test_every_api_route_used_by_the_page_exists():

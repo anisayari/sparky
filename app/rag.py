@@ -98,6 +98,8 @@ def db():
                 state TEXT, error TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES documents(id)
                 ON DELETE CASCADE, ord INTEGER, page INTEGER, text TEXT, vec TEXT);
+            CREATE TABLE IF NOT EXISTS pdf_originals(doc_id INTEGER PRIMARY KEY REFERENCES documents(id)
+                ON DELETE CASCADE, body BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS chunks_doc ON chunks(doc_id);""")
             try:
                 _upgrade(_db)
@@ -169,7 +171,10 @@ def add_document(collection_id, name, data, mime="", *, source="", folder=None, 
         previous = conn.execute("SELECT id,fingerprint,state FROM documents WHERE collection_id=? AND source=? "
                                 "AND name=? ORDER BY added DESC LIMIT 1", (collection_id, source, name)).fetchone()
         if previous and previous["fingerprint"] == fingerprint and previous["state"] != "error":
-            return previous["id"]
+            # Reimporting a PDF indexed before 1.8 also restores its original page previews.
+            if (previous["state"] != "ready" or attach.kind_of(name, mime) != "pdf" or
+                    conn.execute("SELECT 1 FROM pdf_originals WHERE doc_id=?", (previous["id"],)).fetchone()):
+                return previous["id"]
         if previous:
             conn.execute("DELETE FROM documents WHERE id=?", (previous["id"],))
         count, used = conn.execute("SELECT COUNT(*),COALESCE(SUM(length(body)),0) FROM pending_documents").fetchone()
@@ -228,24 +233,17 @@ def delete_document(did):
 
 
 def _pages(name, data, mime):
-    """[(page or None, text)] using attach.py readers; PDFs are split per page."""
+    """Yield (page or None, text, OCR flag) with the same local readers as attachments."""
     k, ext = attach.kind_of(name, mime), os.path.splitext(name.lower())[1]
     if k == "pdf":
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            raise RuntimeError("lecture des PDF indisponible (relance l'installation)") from None
-        import io
-        pages = [(i + 1, (p.extract_text() or "").strip()) for i, p in enumerate(PdfReader(io.BytesIO(data)).pages)]
-        if not any(t for _, t in pages):
-            raise RuntimeError("PDF scanné sans texte (images seulement)")
-        return pages
+        import pdf_text
+        return pdf_text.pages(data, MAX_CHARS)
     if k == "doc":
-        return [(None, attach._office(data, ext))]
+        return [(None, attach._office(data, ext), False)]
     if k in ("audio", "video"):
-        return [(None, attach._audio(data))]
+        return [(None, attach._audio(data), False)]
     if k == "text" or attach._looks_text(data):
-        return [(None, attach._decode_text(data))]
+        return [(None, attach._decode_text(data), False)]
     raise RuntimeError("format non lu : seuls le texte, les PDF, Office, l'audio et la vidéo sont pris en compte")
 
 
@@ -279,10 +277,10 @@ def chunk(text, size=CHUNK, overlap=OVERLAP):
 def _ingest(did, name, data, mime):
     try:
         pieces, total = [], 0
-        for page, text in _pages(name, data, mime):
+        for page, text, ocr in _pages(name, data, mime):
             text = text[:max(0, MAX_CHARS - total)]
             total += len(text)
-            pieces += [(page, c) for c in chunk(text)]
+            pieces += [(page, ("[OCR] " if ocr else "") + c) for c in chunk(text)]
         if not pieces:
             raise RuntimeError("fichier vide")
         vecs = []
@@ -298,6 +296,8 @@ def _ingest(did, name, data, mime):
             db().executemany("INSERT INTO chunks(doc_id,ord,page,text,vec) VALUES(?,?,?,?,?)",
                              [(did, i, p, c, json.dumps(vecs[i]) if vecs else None) for i, (p, c) in enumerate(pieces)])
             db().execute("UPDATE documents SET state='ready', chars=? WHERE id=?", (total, did))
+            if attach.kind_of(name, mime) == "pdf":
+                conn.execute("INSERT INTO pdf_originals SELECT doc_id,body FROM pending_documents WHERE doc_id=?", (did,))
             conn.execute("DELETE FROM pending_documents WHERE doc_id=?", (did,))
     except Exception as e:
         with _lock, db() as conn:
@@ -329,13 +329,23 @@ def live_hits(hits, selected_ids):
         for number, hit in enumerate(hits, 1):
             if hit.get("collection_id") not in selected or not hit.get("revision"):
                 continue
-            row = db().execute("SELECT c.text,c.page,d.name AS doc,l.name AS collection FROM chunks c "
+            row = db().execute("SELECT c.text,c.page,d.name AS doc,l.name AS collection,"
+                               "EXISTS(SELECT 1 FROM pdf_originals p WHERE p.doc_id=d.id) AS page_preview FROM chunks c "
                                "JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id "
                                "WHERE c.id=? AND d.id=? AND d.collection_id=? AND d.revision=? AND d.state='ready'",
                                (hit.get("chunk_id"), hit.get("doc_id"), hit["collection_id"], hit["revision"])).fetchone()
             if row:
                 live.append(hit | dict(row) | {"source_number": hit.get("source_number", number)})
     return live
+
+
+def original_page(ref, selected):
+    if ref["collection_id"] not in selected:
+        return None
+    rows = _read("SELECT p.body,c.page FROM pdf_originals p JOIN chunks c ON c.doc_id=p.doc_id "
+                 "JOIN documents d ON d.id=c.doc_id WHERE c.id=? AND d.id=? AND d.collection_id=? AND d.revision=? "
+                 "AND d.state='ready' AND c.page>0", [ref["chunk_id"], ref["doc_id"], ref["collection_id"], ref["revision"]])
+    return rows[0] if rows else None
 
 
 def _terms(t):
@@ -351,6 +361,7 @@ def search(query, collection_ids=None, k=6):
         return []
     scope = " AND d.collection_id IN (" + ",".join("?" for _ in ids) + ")" if ids else ""
     cols = ("c.id AS chunk_id,c.doc_id,c.page,c.text,c.vec,d.name AS doc,l.name AS collection,"
+            "EXISTS(SELECT 1 FROM pdf_originals p WHERE p.doc_id=d.id) AS page_preview,"
             "d.collection_id,d.revision")
     joins = (" FROM chunks c JOIN documents d ON d.id=c.doc_id JOIN collections l ON l.id=d.collection_id ")
     terms = list(dict.fromkeys(_terms(query)))[:32]
@@ -397,14 +408,19 @@ def search(query, collection_ids=None, k=6):
             cos = sum(a * b for a, b in zip(qv[0], json.loads(vec)))
             score = 0.7 * max(0.0, min(1.0, (cos - 0.75) / 0.2)) + 0.3 * score
         r["score"] = round(score, 4)
-    hits, seen = [], []
+    hits, seen_text, seen_by_doc = [], set(), {}
     for r in sorted(rows, key=lambda row: -row["score"]):
         if r["score"] <= 0 or len(hits) >= k:
             break
-        tokens = set(_terms(r["text"]))
-        if any(len(tokens & prev) / max(1, len(tokens | prev)) > 0.8 for prev in seen):
+        # Similar editions may change only a number or a negation. Suppress near-duplicates
+        # within one document, but only collapse identical text across distinct documents.
+        normalized = " ".join(r["text"].split())
+        tokens = set(_terms(normalized))
+        neighbors = seen_by_doc.setdefault(r["doc_id"], [])
+        if normalized in seen_text or any(len(tokens & prev) / max(1, len(tokens | prev)) > 0.8 for prev in neighbors):
             continue
-        seen.append(tokens)
+        seen_text.add(normalized)
+        neighbors.append(tokens)
         hits.append(r)
     return hits
 

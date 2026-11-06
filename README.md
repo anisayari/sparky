@@ -7,9 +7,9 @@
 
 <h1 align="center">Sparky</h1>
 
-<p align="center"><b>Your private AI assistant. 100% local.</b><br>
+<p align="center"><b>Your AI assistant on your PC.</b><br>
 Chat, see images, generate pictures and videos with sound, build apps, ask your documents, dictate and listen —<br>
-everything runs on your own PC. Nothing is sent to the internet unless you turn it on.</p>
+choose a local model for offline chat, or explicitly connect a cloud provider and web tools.</p>
 
 <p align="center">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6">
@@ -29,6 +29,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 🔒 **Local chat history** — temporary chats keep their own transient files and support text and vision. Use a regular chat for image generation or editing, because the shared ComfyUI engine retains inputs and outputs.
 - ✏️ **Edit** any message, 🔁 **regenerate** or ➡️ **continue** an answer, and flip between versions (‹ 2/3 ›).
 - Open a separate conversation from a message to try another approach. Generated files follow the selected version. Use **Stop** to interrupt a running turn.
+- Reopen a saved conversation while an answer is running to catch up on missed events and follow the rest live. Reconnecting subscribes to the existing turn, so its tools run once. After a server restart, Sparky restores the saved checkpoint and marks an interrupted turn.
 - 🧠 **Adjustable thinking** — Off, Light, Normal or Deep, and see how the model reasoned.
 - 📝 **Rich answers** — tables, LaTeX formulas, Mermaid diagrams, task lists, syntax-highlighted code (all offline).
 - 👁️ **Vision** — drop photos, screenshots or scans: the assistant sees and analyses them.
@@ -36,6 +37,9 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 🗂️ **Organize your chats** — full-text search, rename, 📌 pin, 📁 folders, export (JSON / Markdown) and import.
 
 ### 📚 Knowledge & web
+- **PDF scans and exact quotations.** Windows OCR reads image-only pages using an installed Windows OCR language (up to 200 scanned pages per file). Enable **Documents only** in a chat to get checked quotations from the selected collections or an explicit missing-answer response. The mode requires a local model. Open a PDF citation to see the original page for newly indexed PDFs. Reimport older PDFs to enable their page preview.
+- **Project spaces.** In **Workspace → Projects**, group conversations with shared instructions and document collections. Choose a project under the chat composer to reuse its context in another conversation.
+- **Deep research.** In **Workspace → Deep research**, ask your local model for a plan. Edit up to six questions, choose collections and optionally enter exact website hostnames. With websites enabled, the search engine receives the plan questions. Sparky reads pages on those hosts and writes a cited report. If the model fails to supply valid references, Sparky shows the collected excerpts. Reopen the workspace to follow progress or resume after a restart.
 - 📄 **Ask your documents (RAG)** — collections of PDFs, Office files, text, code… indexed on your PC, answers **with numbered sources** [1] [2].
 - Link a local folder in **Workspace > Documents** to index additions, edits and removals. When upgrading an existing library, reselect the collections for each assistant or conversation that needs them. The library retains the documents.
 - 🌐 **Web search, when you want it** — turn on *Web*: the assistant searches (DuckDuckGo or your SearXNG), reads pages and the links you paste, and cites them. Off by default.
@@ -53,6 +57,9 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 - 🔊 **Read aloud** — on any answer, offline Piper voices (English, French, German, Spanish, Italian).
 
 ### 🛠️ Tools & automation
+- **Reusable document comparisons.** In **Workspace → Scheduled tasks**, select a collection and the comparison recipe. Choose the older and newer indexed files. Run now or on a schedule. Review additions and removals with their page numbers, then approve or reject the result. The comparison uses indexed text and requires no model.
+- **Compare local models.** In **Workspace → Compare models**, send the same question to two installed chat models, see their answers and generation times side by side, then continue with either one in that workspace. The comparison loads one CPU worker at a time and keeps the main chat model available. Its dialogue lasts for the current tab.
+- **Editable Office downloads.** Use the Word or Excel action on a chat reply. Word preserves headings, lists and tables. Excel converts Markdown tables to cells and supports recalculable totals in recognized total rows.
 - 💻 **Computer mode** — Sparky can look at and act on your PC: browse folders and the desktop, read and search files (PDF and Office too), take a screenshot, write, copy, move, send to the Recycle Bin, open files and apps, run PowerShell commands. **You choose the security level** for each chat: *Off*, *Read only*, *Read freely & ask before changes* (recommended), *Ask for everything* or *Full access*; actions that need your OK show an **approval card** (Allow / Always in this chat / Deny).
 - 🔌 **MCP tools** — plug any Model Context Protocol server (same config as Claude Desktop: files, GitHub, databases…).
 - ⏰ **Scheduled tasks** — "every morning at 8, summarize the tech news": the answer lands in a new chat.
@@ -117,7 +124,7 @@ everything runs on your own PC. Nothing is sent to the internet unless you turn 
 
 > **Status: in active development.** Sparky Bot ships as a beta inside Sparky (sidebar → *Sparky Bot*). It works today, but the memory engine and the personality system are still being tuned and may change.
 
-Sparky Bot is a friend-like companion that **remembers you, learns your style and grows with you** — in the spirit of OpenAI's *Dots* and Grok's companions, but **100% local** and with a memory you can actually see and edit.
+Sparky Bot is a companion that **remembers you and learns your style**. You can inspect and edit its memory. Turn on **Local only** to require a local model for the companion.
 
 <p align="center"><img src="docs/demo-bot.gif" alt="Sparky Bot learns about the user while chatting" width="900"></p>
 
@@ -134,16 +141,17 @@ Sparky Bot is a friend-like companion that **remembers you, learns your style an
 - **Learns your style** — tone, length, formality, humor, language.
 - **Reflects when idle** — merges duplicates, writes a short journal, updates its summary of your relationship and prepares what to ask next time ("How did the meetup go?").
 - **Relationship level** — from *Just met* to *Close friends* as you talk over days. Always a friend: never romantic, never clingy.
-- **You stay in control** — see, edit, pin or delete any memory, turn learning off, or *Forget everything* in one click. Nothing leaves your PC.
+- **You stay in control** — see, edit, pin or delete a memory, turn learning off, or select *Forget everything*. If you allow a cloud model for the companion, its enabled memory context is included in requests to that provider.
 
 **Roadmap**
 
 - [x] Persistent memory with add / update / forget, guard-rails and semantic search
 - [x] Style profile, journal, follow-ups, relationship level, 4 personalities
 - [x] Animated avatar, bilingual UI (English / French)
-- [ ] Voice conversations (Whisper in, local text-to-speech out; read-aloud already works in the main chat)
+- [x] Hands-free local calls in Sparky Bot: speak with Whisper, hear the reply through Piper, interrupt by speaking again, or hang up to release the microphone. Install the voice models before calling.
 - [ ] Proactive check-ins (optional notifications)
-- [ ] Memory import / export, per-memory "why do you know this?" with the source message
+- [x] Inspect the dated source messages of newly learned memories. Manual and legacy memories identify their origin where available. Forgetting a fact also clears derived summaries and prevents earlier context from reintroducing it.
+- [ ] Memory import / export
 - [ ] Larger evaluation set for the memory engine across models
 
 ## 🚀 Install (Windows 10/11)

@@ -336,6 +336,10 @@ body.botmode #scroll,body.botmode footer,body.botmode #art{display:none!importan
 .bin textarea{flex:1;background:none;border:0;outline:0;color:var(--txt);font:inherit;resize:none;height:36px;max-height:160px;padding:7px 0}
 .bin button{width:36px;height:36px;border-radius:50%;background:var(--inv-bg);color:var(--inv-fg);display:grid;place-items:center;flex:none}
 .bin button:disabled{opacity:.25}
+#voiceInfo{max-width:820px;width:calc(100% - 40px);margin:0 auto 5px;color:var(--mute);font-size:13px}
+#voiceInfo:empty{display:none}
+.bin #voiceCall{border-radius:16px;width:auto;padding:0 12px;font-size:12px;white-space:nowrap}
+.bin #voiceCall[aria-pressed="true"]{background:#812b40;color:white}
 .bside{width:360px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;background:var(--s1);min-height:0}
 .bcard{padding:18px 18px 12px;text-align:center;border-bottom:1px solid var(--line)}
 #avatar{width:118px;height:118px;margin:0 auto 6px;animation:float 4s ease-in-out infinite}
@@ -374,7 +378,8 @@ body.botmode #scroll,body.botmode footer,body.botmode #art{display:none!importan
 .mi .imp{display:flex;gap:2px;padding-top:6px;cursor:pointer;flex:none}
 .mi .imp i{width:5px;height:5px;border-radius:50%;background:var(--s4)}.mi .imp i.on{background:#8c7cf0}
 .mi button{color:var(--dim);font-size:13px;line-height:1;padding:2px;visibility:hidden}
-.mi:hover button,.mi button.pinned{visibility:visible}
+.mi:hover button,.mi:focus-within button,.mi button.pinned,.mi button.origin{visibility:visible}
+.mi button.origin{min-width:20px;border:1px solid var(--line);border-radius:50%}
 .mi button.pinned{color:#e8c46a}.mi button:hover{color:var(--txt)}
 .madd{display:flex;gap:6px;margin-top:12px}
 .madd input{flex:1;background:var(--s15);border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:7px 10px;font:inherit;font-size:13px;outline:0}
@@ -389,7 +394,14 @@ body.botmode #scroll,body.botmode footer,body.botmode #art{display:none!importan
 .bf{margin-bottom:14px}.bf label{display:block;font-size:12px;color:var(--mut);margin-bottom:5px}
 .bf input,.bf select,.bf textarea{width:100%;background:var(--s15);border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:7px 10px;font:inherit;font-size:13px;outline:0}
 .bf textarea{height:70px;resize:vertical}
-@media(max-width:1000px){.bside{display:none}}
+.bot-panel-switch{display:none}
+@media(max-width:1000px){
+  .bside{display:none}
+  .bot-panel-switch{display:block;align-self:flex-end;margin:6px 12px;padding:6px 12px;border-radius:12px;background:var(--s3)}
+  #bot.show-memory .bside{display:flex;width:100%;border:0}
+  #bot.show-memory .bchat{display:none}
+  .mi button{visibility:visible}
+}
 /* ---- marque */
 .brand{display:flex;align-items:center;gap:9px;padding:4px 6px;min-width:0}
 .brand img{width:28px;height:28px;flex:none}
@@ -689,11 +701,15 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
   <div id="scroll"><div id="log"></div></div>
   <div id="bot">
     <div class="bchat">
+      <button class="bot-panel-switch" id="showBotMemory" aria-controls="bpane">Mémoire</button>
       <div id="blog"></div>
+      <div id="voiceInfo" role="status" aria-live="polite"></div>
       <div class="bin"><textarea id="bmsg" rows="1" placeholder="Écris à ton compagnon…"></textarea>
+        <button id="voiceCall" type="button" aria-pressed="false" title="Démarrer un appel vocal local">Appeler</button>
         <button id="bsend" title="Envoyer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div>
     </div>
     <aside class="bside">
+      <button class="bot-panel-switch" id="hideBotMemory">Conversation</button>
       <div class="bcard">
         <div id="avatar"><svg viewBox="0 0 120 120">
           <defs><radialGradient id="ag" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset=".35" style="stop-color:var(--pc,#8c7cf0)"/><stop offset="1" style="stop-color:var(--pc2,#4b3fb0)"/></radialGradient></defs>
@@ -816,7 +832,7 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
 
 <div id="ws"><div class="lw">
   <div class="lh"><h2>Espace de travail</h2><span class="sp"></span><button class="ib" id="wsx" title="Fermer"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
-  <div class="chips" id="wsTabs"><button data-t="assistants">Assistants</button><button data-t="prompts">Prompts</button><button data-t="knowledge">Documents</button><button data-t="tools">Outils (MCP)</button><button data-t="tasks">Tâches programmées</button><button data-t="api">API</button><button data-t="prefs">Préférences</button></div>
+  <div class="chips" id="wsTabs"><button data-t="assistants">Assistants</button><button data-t="projects">Projets</button><button data-t="prompts">Prompts</button><button data-t="knowledge">Documents</button><button data-t="tools">Outils (MCP)</button><button data-t="research">Recherche approfondie</button><button data-t="compare">Comparer les modèles</button><button data-t="tasks">Tâches programmées</button><button data-t="api">API</button><button data-t="prefs">Préférences</button></div>
   <div id="wsB"></div>
 </div></div>
 <div id="sysd"><div class="card"><h3>Instructions pour cette conversation</h3>
@@ -850,11 +866,34 @@ body.studiomode #scroll,body.studiomode footer,body.studiomode #art,body.studiom
   </div>
   <div id="edst"><div id="edwrap"><canvas id="cv"></canvas><canvas id="mk"></canvas></div></div>
 </div>
+<script src="/ui/project-spaces.js"></script>
+<script src="/ui/voice-call.js"></script>
 <script>
 // ---------- langue de l'interface : le texte source est en français, traduit à l'affichage en anglais
 let LANG='en';try{LANG=localStorage.getItem('sparky.lang')||'en'}catch{}
 document.documentElement.lang=LANG;
 const EN={
+ 'Activer la recherche par le sens (E5, env. 0,5 Go)':'Enable semantic search (E5, about 0.5 GB)',
+ 'Recherche par mots-clés active.':'Keyword search is on.',
+ 'Le modèle de mémoire n’a pas pu être chargé. La recherche par mots-clés reste disponible.':'The memory model could not load. Keyword search is available.',
+ 'Appeler':'Call','Raccrocher':'Hang up','Démarrer un appel vocal local':'Start a local voice call',
+ 'Activer le mode local du compagnon pour cet appel et les suivants ?':'Enable local-only companion mode for this and future calls?',
+ 'Préparation du micro…':'Preparing the microphone…','À ton écoute…':'Listening…','Parole détectée…':'Recording speech…',
+ 'Transcription locale…':'Transcribing locally…','Le compagnon répond…':'The companion is replying…',
+ 'Lecture vocale… Parle pour interrompre.':'Speaking… Speak to interrupt.',
+ 'Activez le mode local du compagnon pour l’appel vocal.':'Turn on local-only mode in the companion settings for voice calls.',
+ 'Sélectionnez un modèle local pour l’appel vocal.':'Select a local model for voice calls.',
+ 'Installez la lecture vocale dans les préférences de l’espace de travail.':'Set up text-to-speech in workspace preferences.',
+ 'Installez la voix dans les préférences de l’espace de travail.':'Install the voice in workspace preferences.',
+ 'La voix se télécharge. Relancez l’appel quand elle sera prête.':'The voice is downloading. Start the call again when it is ready.',
+ 'Télécharger cette voix pour les appels hors ligne ?':'Download this voice for offline calls?',
+ 'Attendez la fin de la réponse en cours.':'Wait for the current reply to finish.',
+ 'Relancez l’installation complète de Sparky pour activer la dictée Whisper.':'Run the full Sparky installation to enable Whisper dictation.',
+ 'Projet':'Project','Projets':'Projects','Nouveau projet':'New project','Sans projet':'No project',
+ 'Gérer les projets…':'Manage projects…','Instructions partagées':'Shared instructions',
+ 'Collections du projet':'Project collections','Nouveau fil':'New chat',
+ 'Créer un projet pour regrouper ses conversations, ses instructions et ses documents.':'Create a project to group its chats, instructions and documents.',
+ 'Supprimer le projet ? Ses conversations et documents resteront disponibles séparément.':'Delete the project? Its chats and documents will still be available separately.',
  '100 % local · privé':'100% local · private','Conversation éphémère':'Temporary chat','éphémère':'temporary','Paramètres':'Settings','Conversations':'Chats',
  'Mém.':'Mem.','Bibliothèque de modèles':'Model library','Bibliothèque de modèles…':'Model library…','Tous':'All','Installés':'Installed','Assistants':'Assistants',
  'Images':'Images','Voix':'Voice','voix':'voice','Recommandés':'Recommended','Nom':'Name','Taille':'Size','Sur Hugging Face':'On Hugging Face',
@@ -918,6 +957,7 @@ const EN={
  'Espace de travail':'Workspace','Assistants, documents, prompts, outils, tâches, API':'Assistants, documents, prompts, tools, tasks, API',
  'Rechercher dans les conversations':'Search conversations','Importer une conversation (JSON)':'Import a conversation (JSON)',
  'Outils (MCP)':'Tools (MCP)','Tâches programmées':'Scheduled tasks','Préférences':'Preferences',
+ 'Recherche approfondie':'Deep research','Comparer les modèles':'Compare models',
  'Instructions pour cette conversation':'Instructions for this conversation','Le modèle les suit pendant toute la conversation (rôle, ton, contraintes…).':'The model follows them for the whole conversation (role, tone, constraints…).',
  'Recherche sur le web':'Web search','Lit une page web':'Reads a web page','Cherche dans tes documents':'Searches your documents','Outil':'Tool',
  'Sources web':'Web sources','Tes documents':'Your documents','lit les sources…':'reading the sources…',
@@ -928,6 +968,9 @@ const EN={
  'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)':'Search the Internet and read links (queries go out to the Internet)',
  'Répondre à partir de tes documents':'Answer from your documents','Par défaut (Sparky)':'Default (Sparky)','Gérer les assistants…':'Manage assistants…',
  'Répondre à partir de':'Answer from','Aucune collection pour l’instant.':'No collection yet.','Ajouter des documents…':'Add documents…',
+ 'Uniquement mes collections (modèle local)':'Only my collections (local model)','Documents uniquement':'Documents only',
+ 'Télécharger en Word':'Download as Word','Télécharger en Excel':'Download as Excel','Échec de l’export':'Export failed',
+ 'Ouvrir la page':'Open page','Aperçu indisponible':'Preview unavailable','Le Web est suspendu en mode documents uniquement.':'Web access is paused in documents-only mode.',
  'Résultats':'Results','Aucun résultat':'No results','Épinglées':'Pinned','Renommer':'Rename','Épingler':'Pin','Désépingler':'Unpin',
  'Partager une copie JSON (sources internes retirées)':'Share a JSON copy (internal sources removed)',
  'Sauvegarder ce fil avec ses sources…':'Back up this chat with its sources…',
@@ -1164,8 +1207,8 @@ async function open_(id){if(busy)return;SID=id;setEph(false);log.innerHTML=HELLO
 function blank(eph){if(busy)return;SID=null;setEph(eph);log.innerHTML=HELLO;T=null;resetArts();pend=[];pfiles=[];mask=null;renderAtt();loadList();ta.focus()}
 $('new').onclick=$('new2').onclick=()=>blank(false);
 $('eph').onclick=()=>blank(!EPH);
-(async()=>{let id=null;try{id=localStorage.getItem('sparky.sid')}catch{}
-  const l=await(await fetch('/api/sessions')).json();if(id&&l.some(s=>s.id===id))open_(id);else blank(false)})();
+addEventListener('DOMContentLoaded',()=>{let id=null;try{id=localStorage.getItem('sparky.sid')}catch{}
+  if(id)open_(id);else blank(false)});
 
 // ---------- moniteur (modèles + charge)
 const hist={cpu:[],gpu:[]};
@@ -1402,7 +1445,7 @@ $('recStop').onclick=async()=>{if(!REC||REC.stopped)return;const rate=REC.ctx.sa
 addEventListener('keydown',e=>{if(!REC)return;if(e.key==='Escape')$('recX').click();else if(e.key==='Enter'){e.preventDefault();$('recStop').click()}});
 
 // ---------- Sparky Bot : compagnon avec mémoire
-let BOT=null,bTab='mem',bBusy=false,bQ='';
+let BOT=null,bTab='mem',bBusy=false,bQ='',embedTimer=0;
 const PCOL={warm:['#8c7cf0','#4b3fb0'],playful:['#f0a35a','#c0532a'],coach:['#3ecf8e','#1e7d55'],calm:['#5aa9ff','#2b5fb0']};
 const FRL={'Just met':'On vient de se rencontrer','Getting to know you':'On apprend à se connaître','Friends':'Amis','Good friends':'Bons amis','Close friends':'Amis proches',
  'Warm & supportive':'Chaleureux et bienveillant','Playful & witty':'Joueur et plein d’esprit','Focused coach':'Coach motivant','Calm & thoughtful':'Calme et réfléchi'};
@@ -1411,12 +1454,20 @@ const CATL={identity:'Qui tu es',preference:'Goûts et préférences',project:'P
 const api=(p,b)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
 function avatarState(s){const a=$('avatar');a.classList.remove('think','talk');if(s)a.classList.add(s)}
 function setBotMode(on){document.body.classList.toggle('botmode',on);$('botNav').classList.toggle('on',on);
+  if(!on)stopVoiceCall();
+  if(on&&matchMedia('(max-width:760px)').matches)setSide(false);
   if(on){$('eph').classList.remove('on');document.querySelectorAll('.cv').forEach(c=>c.classList.remove('on'));openBot()}
   try{localStorage.setItem('sparky.bot',on?'1':'0')}catch{}}
 $('botNav').onclick=()=>setBotMode(true);
+$('showBotMemory').onclick=()=>{$('bot').classList.add('show-memory');$('hideBotMemory').focus()};
+$('hideBotMemory').onclick=()=>{$('bot').classList.remove('show-memory');$('showBotMemory').focus()};
 ['new','new2','eph'].forEach(id=>$(id).addEventListener('click',()=>setBotMode(false),true));
 $('list').addEventListener('click',()=>setBotMode(false),true);
-async function loadBot(){BOT=await(await fetch('/api/bot')).json();renderBotCard();renderPane();return BOT}
+async function loadBot(){BOT=await(await fetch('/api/bot')).json();renderBotCard();renderPane();
+  clearTimeout(embedTimer);
+  if(BOT.embedJob?.state==='running'&&document.body.classList.contains('botmode'))
+    embedTimer=setTimeout(()=>{if(document.body.classList.contains('botmode'))loadBot()},2000);
+  return BOT}
 function renderBotCard(){const p=BOT.profile,c=PCOL[p.persona]||PCOL.warm;
   for(const el_ of [$('avatar'),$('botNav')]){el_.style.setProperty('--pc',c[0]);el_.style.setProperty('--pc2',c[1])}
   $('bname').textContent=p.name;$('bpers').textContent=lbl(BOT.persona[0]);
@@ -1428,28 +1479,36 @@ function bmsgEl(m){const d=el('div','bm '+m.role);d.innerHTML=mdx(m.text||'');if
 function renderLog(){const L=$('blog');L.innerHTML='';BOT.messages.forEach(m=>L.append(bmsgEl(m)));L.scrollTop=L.scrollHeight}
 async function openBot(){await loadBot();renderLog();
   const last=BOT.messages.at(-1);if(!last||Date.now()/1000-last.ts>3*3600)botStream('/api/bot/greet',{})}
-async function botStream(path,body,userText){if(bBusy)return;bBusy=true;$('bsend').disabled=true;const L=$('blog');
+async function botStream(path,body,userText,signal){if(bBusy)return;bBusy=true;$('bsend').disabled=true;const L=$('blog');
+  let finalReply='',failure='';
   if(userText){L.append(bmsgEl({role:'user',text:userText,ts:Date.now()/1000}))}
   const d=el('div','bm assistant');d.innerHTML='<span class="dots"><i></i><i></i><i></i></span>';L.append(d);L.scrollTop=L.scrollHeight;avatarState('think');
   const before=BOT.last_ops&&BOT.last_ops.ts;
-  try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  try{const r=await fetch(path,{method:'POST',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){const j=await r.json();throw new Error(j.error)}
     const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
     for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let k;
       while((k=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,k);buf=buf.slice(k+2);if(!line.startsWith('data: '))continue;const e=JSON.parse(line.slice(6));
         if(e.type==='token'){avatarState('talk');d.innerHTML=mdx(e.text);L.scrollTop=L.scrollHeight}
-        else if(e.type==='reply'){d.innerHTML=mdx(e.text);d.append(el('span','ts',hhmm()));if(e.bond){BOT.bond=e.bond;renderBotCard()}}
+        else if(e.type==='reply'){finalReply=e.text;d.innerHTML=mdx(e.text);d.append(el('span','ts',hhmm()));if(e.bond){BOT.bond=e.bond;renderBotCard()}}
         else if(e.type==='noop'){d.remove()}
-        else if(e.type==='error'){d.innerHTML='<span class="err">'+esc(tr(e.text))+'</span>'}}}
-  }catch(e){d.innerHTML='<span class="err">'+esc(tr('Message non envoyé : '+e.message))+'</span>'}
-  finally{bBusy=false;$('bsend').disabled=false;avatarState(null);if(userText)watchLearning(before,d)}}
+        else if(e.type==='error'){failure=e.text;d.innerHTML='<span class="err">'+esc(tr(e.text))+'</span>'}}}
+  }catch(e){failure=e.message;if(signal?.aborted)d.remove();else d.innerHTML='<span class="err">'+esc(tr('Message non envoyé : '+e.message))+'</span>'}
+  finally{bBusy=false;$('bsend').disabled=!!voiceCall;avatarState(null);if(userText&&!failure&&BOT?.profile.memory_on)watchLearning(before,d)}
+  if(path==='/api/bot/voice'&&failure)throw new Error(failure);
+  return finalReply}
 async function watchLearning(before,after){for(let i=0;i<40;i++){await new Promise(r=>setTimeout(r,1500));await loadBot();const o=BOT.last_ops;
   if(o&&o.ts!==before){const n=el('div','learned');
     (o.add||[]).forEach(a=>n.append(el('span','','🧠 + '+esc(a.text))));(o.update||[]).forEach(u=>n.append(el('span','up','✎ '+esc(u.text))));
     if((o.delete||[]).length)n.append(el('span','del','− '+tr(o.delete.length>1?o.delete.length+' souvenirs oubliés':'1 souvenir oublié')));
+    for(const id of o.forget_requests||[]){
+      const m=BOT.memories.find(row=>row.id===id);if(!m)continue;
+      const b=el('button','bbtn',LANG==='fr'?'Vérifier l’oubli demandé':'Review removal');b.onclick=()=>reviewForget(m);n.append(b)
+    }
     if(n.childNodes.length){after.after(n);$('blog').scrollTop=$('blog').scrollHeight}return}}}
-function bsend(){const t=$('bmsg').value.trim();if(!t||bBusy)return;$('bmsg').value='';bgrow();botStream('/api/bot/chat',{text:t},t)}
+function bsend(){const t=$('bmsg').value.trim();if(!t||bBusy||voiceCall)return;$('bmsg').value='';bgrow();botStream('/api/bot/chat',{text:t},t)}
 function bgrow(){const t=$('bmsg');t.style.height='36px';t.style.height=Math.min(160,t.scrollHeight)+'px'}
+$('voiceCall').onclick=toggleVoiceCall;
 $('bsend').onclick=bsend;$('bmsg').addEventListener('input',bgrow);
 $('bmsg').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();bsend()}});
 document.querySelectorAll('.btabs button').forEach(b=>b.onclick=()=>{bTab=b.dataset.t;document.querySelectorAll('.btabs button').forEach(x=>x.classList.toggle('on',x===b));renderPane()});
@@ -1462,7 +1521,16 @@ function renderPane(){const P=$('bpane');if(!BOT)return;
     const add=el('div','madd');const ai=el('input');ai.placeholder='Ajouter un souvenir…';const ab=el('button','','Ajouter');
     ab.onclick=async()=>{if(!ai.value.trim())return;await api('/api/bot/memory',{text:ai.value.trim(),category:'other',importance:4});ai.value='';ai.blur();await loadBot()};
     ai.onkeydown=e=>{if(e.key==='Enter')ab.click()};add.append(ai,ab);P.append(add);
-    const j=BOT.embedJob;P.append(el('div','bnote',BOT.embeddings?'🔎 Recherche par le sens active (multilingual-e5).':(j&&j.state==='running'?'Téléchargement du modèle de mémoire… '+Math.floor(j.done/Math.max(1,j.total)*100)+' %':'Recherche par mots-clés (modèle de mémoire absent).')));
+    const j=BOT.embedJob;
+    const embed=el('div','bnote',BOT.embeddings?tr('🔎 Recherche par le sens active (multilingual-e5).'):
+      (j?.state==='running'?tr('Téléchargement du modèle de mémoire…')+' '+Math.floor(j.done/Math.max(1,j.total)*100)+' %':
+      tr(BOT.embedError?'Le modèle de mémoire n’a pas pu être chargé. La recherche par mots-clés reste disponible.':'Recherche par mots-clés active.')));
+    if(!BOT.embeddings&&BOT.embedRuntime&&!BOT.embedError&&j?.state!=='running'){
+      if(j?.state==='error')embed.append(document.createTextNode(' · '+(j.error||tr('erreur'))+' '));
+      const setup=el('button','wsbtn',tr('Activer la recherche par le sens (E5, env. 0,5 Go)'));
+      setup.onclick=async()=>{setup.disabled=true;try{const r=await post('/api/install',{id:'e5-small'});if(!r.ok)throw new Error((await r.json()).error||r.statusText);await loadBot()}catch(e){setup.disabled=false;alert(e.message)}};
+      embed.append(document.createTextNode(' '),setup)}
+    P.append(embed);
     const notice=el('div','bnote');
     notice.textContent=BOT.profile.local_only?tr('Compagnon local uniquement'):BOT.cloud_provider?
       tr('Le compagnon utilise le cloud. Les échanges et, si la mémoire est activée, les souvenirs et résumés peuvent être envoyés à')+' '+BOT.cloud_provider+'.':
@@ -1487,7 +1555,11 @@ function renderPane(){const P=$('bpane');if(!BOT)return;
     const f4=el('div','bf');const lab=el('label','');const cb=el('input');cb.type='checkbox';cb.checked=p.memory_on;cb.style.width='auto';lab.append(cb,el('span','',' Mémoire activée (apprendre de nos conversations)'));f4.append(lab);
     const only=el('input');only.type='checkbox';only.checked=!!p.local_only;only.style.width='auto';
     const localLabel=el('label','');localLabel.append(only,document.createTextNode(' '+tr('Compagnon local uniquement')));f4.append(localLabel);
-    const sv=el('button','bbtn','Enregistrer');sv.onclick=async()=>{await api('/api/bot/profile',{name:n.value.trim()||'Sparky',persona:s.value,custom:t.value.trim(),memory_on:cb.checked,local_only:only.checked});await loadBot()};
+    const sv=el('button','bbtn','Enregistrer');sv.onclick=async()=>{
+      const values={name:n.value.trim()||'Sparky',persona:s.value,custom:t.value.trim(),memory_on:cb.checked,local_only:only.checked};
+      const changes=Object.fromEntries(Object.entries(values).filter(([key,value])=>p[key]!==value));
+      changes.expected=Object.fromEntries(['memory_on','local_only'].filter(key=>key in changes).map(key=>[key,p[key]]));
+      const res=await api('/api/bot/profile',changes);if(!res.ok)alert((await res.json()).error);await loadBot()};
     const fg=el('button','bbtn danger','Tout oublier');fg.style.marginLeft='8px';
     fg.onclick=async()=>{if(!confirm('Effacer toute la mémoire, le journal et l’historique de '+p.name+' ?\nC’est définitif.'))return;await api('/api/bot/forget');await loadBot();renderLog();botStream('/api/bot/greet',{})};
     P.append(f1,f2,f3,f4,sv,fg)}}
@@ -1500,8 +1572,34 @@ function renderMems(box){box.innerHTML='';const q=bQ.trim().toLowerCase();const 
       const imp=el('span','imp',[1,2,3,4,5].map(i=>'<i class="'+(i<=m.importance?'on':'')+'"></i>').join(''));imp.title='Importance';
       imp.onclick=async()=>{await api('/api/bot/memory',{id:m.id,importance:m.importance%5+1});await loadBot()};
       const pin=el('button',m.pinned?'pinned':'','★');pin.title='Épingler';pin.onclick=async()=>{await api('/api/bot/memory',{id:m.id,pinned:m.pinned?0:1});await loadBot()};
-      const del=el('button','','✕');del.title='Oublier';del.onclick=async()=>{await api('/api/bot/memory',{id:m.id,delete:1});await loadBot()};
-      r.append(imp,t,pin,del);box.append(r)})}}
+      const why=el('button','origin','?');why.title=LANG==='fr'?'Pourquoi tu sais ça ?':'Why do you know this?';why.setAttribute('aria-label',why.title);
+      const origins=el('div','bnote raw');origins.hidden=true;why.setAttribute('aria-expanded','false');
+      why.onclick=async()=>{origins.hidden=!origins.hidden;why.setAttribute('aria-expanded',String(!origins.hidden));if(origins.hidden)return;
+        try{const res=await fetch('/api/bot/memory-source?id='+encodeURIComponent(m.id));if(!res.ok)throw Error(res.statusText);
+          const data=await res.json();origins.replaceChildren();
+          if(!data.messages.length)origins.textContent=data.source==='user'?(LANG==='fr'?'Saisi ou corrigé par toi.':'Entered or edited by you.'):(LANG==='fr'?'Message d’origine indisponible pour ce souvenir.':'The original message is unavailable for this memory.');
+          for(const msg of data.messages){const line=document.createElement('p');line.textContent=new Date(msg.ts*1000).toLocaleString(LANG)+' · '+msg.text;origins.append(line)}}
+        catch(err){origins.textContent=String(err.message)}};
+      const del=el('button','','✕');del.title='Oublier';del.onclick=()=>reviewForget(m);
+      r.append(imp,t,why,pin,del);box.append(r,origins);
+      if(BOT.forget_requests?.includes(m.id)){
+        const review=el('button','bbtn',LANG==='fr'?'Vérifier l’oubli demandé':'Review removal');
+        const keep=el('button','bbtn',LANG==='fr'?'Conserver':'Keep');
+        review.onclick=()=>reviewForget(m);keep.onclick=async()=>{await api('/api/bot/memory',{id:m.id,keep:true});await loadBot()};
+        box.append(review,keep)
+      }
+    })}}
+async function reviewForget(m){
+  const res=await fetch('/api/bot/memory-source?id='+encodeURIComponent(m.id));if(!res.ok){await loadBot();return}
+  const impact=(await res.json()).forgetImpact,fr=LANG==='fr';
+  const preview=[impact.summary&&((fr?'Résumé':'Summary')+' · '+impact.summary.slice(0,180)),
+    impact.checkin&&((fr?'Suivi':'Follow-up')+' · '+impact.checkin.slice(0,140)),
+    impact.journal&&('Journal · '+impact.journal),impact.style&&('Style · '+impact.style),impact.mood&&(fr?'Humeur':'Mood')].filter(Boolean);
+  const notice=[fr?'Oublier ce souvenir ?':'Forget this memory?',m.text,
+    preview.length&&((fr?'Données dérivées effacées :':'Derived data to clear:')+'\n'+preview.join('\n')),
+    fr?'Les anciens messages resteront lisibles mais seront exclus des prochains échanges.':'Earlier messages remain readable and will be excluded from future exchanges.'].filter(Boolean).join('\n\n');
+  if(confirm(notice)){const reply=await api('/api/bot/memory',{id:m.id,delete:1});if(!reply.ok)alert((await reply.json()).error);await loadBot()}
+}
 try{if(localStorage.getItem('sparky.bot')==='1')setTimeout(()=>setBotMode(true),300)}catch{}
 
 // ---------- pièces jointes
@@ -1943,18 +2041,50 @@ function loadMermaid(){return mermaidP||(mermaidP=new Promise((ok,ko)=>{const s=
 
 // ---------- conversation state: message numbers (edit / regenerate), versions, setup of the conversation
 let UIDX=-1,TBASE=0,VERS={};
-const CFG0=()=>({assistant:null,web:false,web_blocked:false,docs:[],excluded_docs:[],system:'',computer:'off'});
+const CFG0=()=>({assistant:null,project_space:null,web:false,web_blocked:false,docs:[],excluded_docs:[],system:'',computer:'off'});
 let CFG=CFG0(),WS={assistants:[],prompts:[],knowledge:[],schedules:[],unread:[]};
 const _open0=open_,_blank0=blank;
 let navigation=0;
+function drawChatState(s){
+  SID=s.id;setEph(!!s.ephemeral);log.innerHTML=HELLO;stopTimer();T=null;lastUser=null;resetArts();UIDX=-1;
+  activeTurn=null;$('stopTurn').hidden=true;
+  VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{},{reviewSnapshot:!!s.meta?.workflow_run});
+  const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
+  for(const e of s.events)onEvent(e,e.type==='approve'&&s.pendingApprovals?.includes(e.id));
+  if(s.turn?.running){
+    onEvent({type:'started',turnId:s.turn.id},true);
+    if(s.turn.partial&&s.turn.partial.type!=='started')onEvent(s.turn.partial,true)
+  }else if(T){hideTyping();T=null}
+  renderTools();down(true)
+}
+async function fetchChatState(id){
+  const r=await fetch('/api/state?id='+encodeURIComponent(id));if(!r.ok)throw Error(r.statusText);
+  return r.json()
+}
+async function followTurn(id,turn){
+  let retries=0;
+  while(turn?.running&&id===SID){
+    try{
+      const q=new URLSearchParams({id,turnId:turn.id,after:String(turn.cursor)});
+      const r=await fetch('/api/turn/events?'+q);if(!r.ok)throw Error(r.statusText);
+      const page=await r.json();if(id!==SID)return;
+      if(page.reset){const s=await fetchChatState(id);if(!s.id)throw Error('Conversation introuvable.');drawChatState(s);turn=s.turn}
+      else{for(const e of page.events)onEvent(e,true);turn={...turn,cursor:page.cursor,running:page.running}}
+      retries=0
+    }catch(err){
+      if(++retries>=5)throw err;
+      await new Promise(r=>setTimeout(r,Math.min(4000,250*2**retries)))
+    }
+  }
+}
 open_=async function(id){if(busy)return;const request=++navigation;document.body.classList.add('loading-chat');upd();
   try{if(configWrites.has(id))await flushConfig(id);
-    const r=await fetch('/api/state?id='+encodeURIComponent(id));if(!r.ok)throw new Error(r.statusText);
-    const s=await r.json();if(request!==navigation)return;
-    SID=id;setEph(false);log.innerHTML=HELLO;T=null;resetArts();UIDX=-1;
+    const s=await fetchChatState(id);if(request!==navigation)return;
+    if(!s.id){blank(false);return}drawChatState(s);
     try{localStorage.setItem('sparky.sid',id)}catch{}
-    VERS=s.versions||{};CFG=Object.assign(CFG0(),s.config||{},{reviewSnapshot:!!s.meta?.workflow_run});const nu=s.events.filter(e=>e.type==='user').length;TBASE=nu-(s.turns??nu);
-    s.events.forEach(e=>onEvent(e,false));if(T){hideTyping();T=null}renderTools();down(true);loadList();ta.focus()}
+    loadList();ta.focus();
+    if(s.turn?.running){busy=true;document.body.classList.remove('loading-chat');upd();
+      try{await followTurn(id,s.turn)}finally{busy=false;activeTurn=null;$('stopTurn').hidden=true;loadList()}}}
   catch(e){if(request===navigation)alert(tr('Impossible d’ouvrir la conversation')+' · '+e.message)}
   finally{if(request===navigation){document.body.classList.remove('loading-chat');upd()}}};
 blank=function(eph){if(busy)return;++navigation;document.body.classList.remove('loading-chat');UIDX=-1;TBASE=0;VERS={};CFG=CFG0();_blank0(eph);renderTools()};
@@ -1980,19 +2110,50 @@ function sourcesBlock(e){const b=el('div','srcs');b.append(el('span','lbl',(e.ki
   (e.items||[]).forEach(s=>{let url;try{const u=new URL(s.url);if(['http:','https:'].includes(u.protocol))url=u.href}catch{}
     const c=el(url?'a':'button','src','<b>'+esc(s.n)+'</b><span>'+esc(s.title||s.url||'')+'</span>');c.dataset.n=s.n;
     if(url){c.href=url;c.target='_blank';c.rel='noopener';c.title=url+(s.text?'\n\n'+s.text:'')}b.append(c);if(!url){c.type='button';c.title=s.text||'';c.setAttribute('aria-expanded','false');const excerpt=el('span','source-excerpt');excerpt.textContent=s.text||'';excerpt.hidden=true;
-      c.onclick=()=>{excerpt.hidden=!excerpt.hidden;c.setAttribute('aria-expanded',String(!excerpt.hidden))};b.append(excerpt)}});return b}
+      c.onclick=()=>{excerpt.hidden=!excerpt.hidden;c.setAttribute('aria-expanded',String(!excerpt.hidden))};b.append(excerpt);
+      if(s.page&&s.revision){const page=el('button','wsbtn');page.textContent=tr('Ouvrir la page')+' '+s.page;
+        page.onclick=()=>openDocumentPage(s,page);b.append(page)}}});return b}
+async function openDocumentPage(source,button){
+  const id=SID,query=new URLSearchParams({id,collection_id:source.collection_id,doc_id:source.doc_id,revision:source.revision,chunk_id:source.chunk_id});
+  button.disabled=true;
+  try{
+    const response=await fetch('/api/document-page?'+query);
+    if(!response.ok){const error=await response.json();throw new Error(error.error||tr('Aperçu indisponible'))}
+    const blob=await response.blob();if(SID!==id||!button.isConnected)return;
+    const url=URL.createObjectURL(blob),image=$('view').firstChild;
+    image.src=url;image.alt=source.title;$('view').style.display='grid';setTimeout(()=>URL.revokeObjectURL(url),3000);
+  }catch(error){alert(error.message)}finally{button.disabled=false}
+}
 document.addEventListener('click',e=>{const c=e.target.closest('button.cite');if(!c)return;const a=c.closest('.a');if(!a)return;
   const chips=[...a.querySelectorAll('.src')].filter(x=>x.dataset.n===c.dataset.c),s=chips.at(-1);if(!s)return;
   s.focus();if(s.tagName==='BUTTON'&&s.getAttribute('aria-expanded')==='false')s.click();s.scrollIntoView({block:'nearest'});s.classList.add('flash');setTimeout(()=>s.classList.remove('flash'),1400)});
 document.addEventListener('mouseover',e=>{const c=e.target.closest('button.cite');if(!c||c.title)return;const s=[...(c.closest('.a')?.querySelectorAll('.src')||[])].filter(x=>x.dataset.n===c.dataset.c).at(-1);
   if(s)c.title=(s.querySelector('span')?.textContent||'')+(s.title?'\n'+s.title:'')});
 
+async function downloadOffice(format,reply,container,button){
+  button.disabled=true;
+  try{
+    const sources=[...container.querySelectorAll('.src')].map(chip=>{
+      const number=chip.dataset.n,title=chip.querySelector('span')?.textContent||'';
+      return '['+number+'] '+title+(chip.tagName==='A'?' — '+chip.href:'')
+    });
+    const text=reply+(sources.length?'\n\n## Sources\n'+sources.join('\n'):'');
+    const response=await post('/api/office',{format,text});
+    if(!response.ok){const error=await response.json();throw new Error(error.error||tr('Échec de l’export'))}
+    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
+    link.href=url;link.download='Sparky.'+format;link.click();setTimeout(()=>URL.revokeObjectURL(url),2000);
+  }catch(error){alert(error.message)}finally{button.disabled=false}
+}
 // ---------- message actions: copy, read aloud, regenerate, continue, edit, versions
 function replyActs(a,k){a.querySelector(':scope>.mact')?.remove();document.querySelectorAll('.mact.last').forEach(m=>{m.classList.remove('last');m.querySelector('.cont')?.remove()});
   const m=el('div','mact last'),raw=()=>(a._raw||[]).join('\n\n');
   const b=(ic,t,fn,cls)=>{const x=el('button',cls||'',ic);x.title=t;x.onclick=ev=>{ev.stopPropagation();fn(x)};m.append(x);return x};
   b(ICS.copy,'Copier',x=>{navigator.clipboard.writeText(raw());x.innerHTML=ICS.ok;setTimeout(()=>x.innerHTML=ICS.copy,1400)});
   b(ICS.speak,'Lire à voix haute',x=>speak(raw(),x));
+  if(raw().trim()){
+    b('Word',tr('Télécharger en Word'),x=>downloadOffice('docx',raw(),a,x),'tx');
+    b('Excel',tr('Télécharger en Excel'),x=>downloadOffice('xlsx',raw(),a,x),'tx');
+  }
   if(k>=0&&!EPH)b(ICS.copy,'Créer une discussion depuis cette réponse',()=>forkChat(k,'reply'));
   if(k>=0&&!EPH&&!CFG.reviewSnapshot){b(ICS.regen,'Régénérer la réponse',()=>redo('regen',k));b(ICS.cont,'Continuer la réponse',()=>redo('continue',k),'cont')}
   a.append(m)}
@@ -2014,11 +2175,25 @@ async function forkChat(k,side){if(busy||!SID)return;
   try{const r=await post('/api/fork',{id:SID,k,side}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);await open_(j.id)}
   catch(err){alert(err.message)}}
 async function streamTo(url,body){
-  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!r.ok&&!(r.headers.get('content-type')||'').includes('event-stream')){const j=await r.json().catch(()=>({}));throw new Error(j.error||r.status)}
+  let complete=false, duplicate=false, rejected=false, failure;
+  try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok&&!(r.headers.get('content-type')||'').includes('event-stream')){rejected=true;const j=await r.json().catch(()=>({}));throw new Error(j.error||r.status)}
   const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
   for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let i;
-    while((i=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+2);if(line.startsWith('data: '))onEvent(JSON.parse(line.slice(6)),true)}}}
+    while((i=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+2);if(line.startsWith('data: ')){
+      const event=JSON.parse(line.slice(6));onEvent(event,true);if(event.type==='done'){complete=true;duplicate=event.status==='duplicate'}}}}
+  }catch(err){if(rejected)throw err;failure=err}
+  if(!complete||duplicate){
+    // Recovery is read-only. Retrying the POST would also retry tools and uploaded media.
+    for(let attempt=0;attempt<5;attempt++){
+      let state;
+      try{state=await fetchChatState(body.id)}catch(err){failure=err}
+      if(state?.id&&(duplicate||state.turn?.id===body.turnId)){drawChatState(state);await followTurn(body.id,state.turn);return}
+      if(attempt<4)await new Promise(r=>setTimeout(r,300*2**attempt))
+    }
+    throw failure||Error(LANG==='fr'?'Connexion interrompue.':'Connection interrupted.')
+  }
+}
 async function redo(mode,k,text){if(busy||document.body.classList.contains('loading-chat')||!SID)return;busy=true;upd();
   if(mode!=='continue'){const u=log.querySelector('.u[data-k="'+k+'"]');if(u){let n=u;while(n){const x=n.nextSibling;n.remove();n=x}}UIDX=k+TBASE-1;lastUser=null}
   T=null;newTurn();showTyping('');
@@ -2041,9 +2216,14 @@ function renderTools(){const t=$('tools');if(!t)return;t.innerHTML='';
   $('box').style.display=CFG.reviewSnapshot?'none':'';$('reviewNotice').hidden=!CFG.reviewSnapshot;
   const a=WS.assistants.find(x=>x.id===CFG.assistant);
   const ch=(ic,label,on,fn,title)=>{const b=el('button',on?'on':'',ic+'<span>'+esc(label)+'</span>');b.title=title||'';b.onclick=ev=>{ev.stopPropagation();fn(b)};t.append(b);return b};
+  const project=(WS.projects||[]).find(p=>p.id===CFG.project_space);
+  ch(ICS.folder,project?.name||tr('Projet'),!!project,projectMenu,tr('Projet'));
   ch(a?'<span>'+esc(a.emoji||'🤖')+'</span>':ICS.person,a?a.name:tr('Assistant'),!!a,assistantMenu,'Choisir un assistant (rôle, documents, web)');
-  const web=!CFG.web_blocked&&!!(CFG.web||a?.web);ch(ICS.globe,tr('Web')+(a?.web?' · '+tr('Assistant'):''),web,()=>{CFG.web=!web;CFG.web_blocked=web;saveCfg('web','web_blocked')},'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
-  const nd=WS.knowledge.filter(c=>(CFG.docs.includes(c.id)||a?.docs?.includes(c.id))&&!CFG.excluded_docs.includes(c.id)).length;ch(ICS.books,nd?tr('Documents')+' ('+nd+')':tr('Documents'),nd>0,docsMenu,'Répondre à partir de tes documents');
+  const web=!CFG.docs_only&&!CFG.web_blocked&&!!(CFG.web||a?.web);
+  const webButton=ch(ICS.globe,tr('Web')+(a?.web?' · '+tr('Assistant'):''),web,()=>{CFG.web=!web;CFG.web_blocked=web;saveCfg('web','web_blocked')},
+    CFG.docs_only?tr('Le Web est suspendu en mode documents uniquement.'):'Recherche sur Internet et lecture des liens (les requêtes partent sur Internet)');
+  webButton.disabled=!!CFG.docs_only;
+  const nd=WS.knowledge.filter(c=>(CFG.docs.includes(c.id)||a?.docs?.includes(c.id)||project?.docs.includes(c.id))&&!CFG.excluded_docs.includes(c.id)).length;ch(ICS.books,(CFG.docs_only?tr('Documents uniquement'):tr('Documents'))+(nd?' ('+nd+')':''),nd>0||CFG.docs_only,docsMenu,'Répondre à partir de tes documents');
   ch(ICS.note,tr('Instructions'),!!CFG.system,openSysd,'Instructions pour cette conversation')}
 // Serialize preference edits for each conversation. A pending revocation precedes any new turn.
 const configWrites=new Map();
@@ -2051,7 +2231,7 @@ let creatingChat=null;
 function updateLocalConfig(config,patch){
   if(!patch.document_choice){Object.assign(config,patch);return}
   const {id,selected}=patch.document_choice;
-  const inherited=WS.assistants.find(a=>a.id===config.assistant)?.docs||[];
+  const inherited=[...(WS.assistants.find(a=>a.id===config.assistant)?.docs||[]),...((WS.projects||[]).find(p=>p.id===config.project_space)?.docs||[])];
   config.docs=config.docs.filter(cid=>cid!==id);
   config.excluded_docs=config.excluded_docs.filter(cid=>cid!==id);
   if(!selected)config.excluded_docs.push(id);
@@ -2103,11 +2283,15 @@ function assistantMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Assistant')));
   WS.assistants.forEach(a=>mItem(m,(CFG.assistant===a.id?'✓ ':'')+esc((a.emoji||'🤖')+' '+a.name),()=>{CFG.assistant=a.id;saveCfg('assistant')}));
   m.append(el('hr'));mItem(m,esc(tr('Gérer les assistants…')),()=>openWs('assistants'))})}
 function docsMenu(b){menuAt(b,m=>{m.append(el('div','hd',tr('Répondre à partir de')));
+  const strict=el('label'),check=el('input');check.type='checkbox';check.checked=!!CFG.docs_only;
+  check.onchange=()=>{CFG.docs_only=check.checked;saveCfg('docs_only')};strict.onclick=e=>e.stopPropagation();
+  strict.append(check,document.createTextNode(tr('Uniquement mes collections (modèle local)')));m.append(strict,el('hr'));
   if(!WS.knowledge.length)m.append(el('div','hd',tr('Aucune collection pour l’instant.')));
   const preset=WS.assistants.find(a=>a.id===CFG.assistant)?.docs||[];
-  WS.knowledge.forEach(c=>{const l=el('label');const x=el('input');x.type='checkbox';x.checked=(CFG.docs.includes(c.id)||preset.includes(c.id))&&!CFG.excluded_docs.includes(c.id);
+  const project=(WS.projects||[]).find(p=>p.id===CFG.project_space)?.docs||[];
+  WS.knowledge.forEach(c=>{const l=el('label');const x=el('input');x.type='checkbox';x.checked=(CFG.docs.includes(c.id)||preset.includes(c.id)||project.includes(c.id))&&!CFG.excluded_docs.includes(c.id);
     x.onchange=()=>{const change={document_choice:{id:c.id,selected:x.checked}};updateLocalConfig(CFG,change);saveChange(change)};
-    l.append(x,document.createTextNode(c.name+' ('+c.docs.length+')'+(preset.includes(c.id)?' · '+tr('Assistant'):'')));l.onclick=e=>e.stopPropagation();m.append(l)});
+    l.append(x,document.createTextNode(c.name+' ('+c.docs.length+')'+(preset.includes(c.id)?' · '+tr('Assistant'):'')+(project.includes(c.id)?' · '+tr('Projet'):'')));l.onclick=e=>e.stopPropagation();m.append(l)});
   m.append(el('hr'));mItem(m,esc(tr('Ajouter des documents…')),()=>openWs('knowledge'))})}
 function openSysd(){$('sysT').value=CFG.system||'';$('sysd').style.display='grid';$('sysT').focus()}
 $('sysX').onclick=()=>$('sysd').style.display='none';
@@ -2169,14 +2353,15 @@ $('impFile').onchange=async()=>{const f=$('impFile').files[0];$('impFile').value
   catch(e){alert(tr('Import impossible : ')+e.message)}};
 
 // ---------- workspace: assistants, prompts, documents, tools (MCP), scheduled tasks, API, preferences
-let WTAB='assistants',wsTimer=0;
+let WTAB='assistants',wsTimer=0,wsRenderId=0;
 async function loadWS(){try{WS=await(await fetch('/api/workspace')).json()}catch{}renderTools();const n=(WS.unread||[]).length;const b=$('wsBdg');b.textContent=n;b.style.display=n?'inline':'none';return WS}
 function openWs(tab){if(tab)WTAB=tab;$('ws').classList.add('open');renderWs()}
 $('wsNav').onclick=()=>openWs();$('wsx').onclick=()=>{$('ws').classList.remove('open');clearTimeout(wsTimer)};
 $('ws').onclick=e=>{if(e.target.id==='ws'){$('ws').classList.remove('open');clearTimeout(wsTimer)}};
 $('wsTabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;WTAB=b.dataset.t;renderWs()};
-async function renderWs(){await loadWS();[...$('wsTabs').children].forEach(b=>b.classList.toggle('on',b.dataset.t===WTAB));const B=$('wsB');B.innerHTML='';clearTimeout(wsTimer);
-  ({assistants:wsAssistants,prompts:wsPrompts,knowledge:wsKnowledge,tools:wsTools,tasks:wsTasks,api:wsApi,prefs:wsPrefs})[WTAB](B)}
+async function renderWs(){const request=++wsRenderId;clearTimeout(wsTimer);await loadWS();if(request!==wsRenderId||!$('ws').classList.contains('open'))return;
+  [...$('wsTabs').children].forEach(b=>b.classList.toggle('on',b.dataset.t===WTAB));const B=$('wsB');B.innerHTML='';
+  ({assistants:wsAssistants,projects:wsProjects,prompts:wsPrompts,knowledge:wsKnowledge,research:wsResearch,compare:wsCompare,tools:wsTools,tasks:wsTasks,api:wsApi,prefs:wsPrefs})[WTAB](B)}
 const wsSave=async(b)=>{const r=await post('/api/workspace',b);const j=await r.json().catch(()=>({}));if(!r.ok){alert(j.error||'Erreur');throw new Error(j.error)}return j};
 function field(label,input){const l=el('label');l.append(document.createTextNode(tr(label)),input);return l}
 function inp(type,val,ph){const i=el(type==='textarea'?'textarea':'input');if(type!=='textarea')i.type=type;if(val!=null)i.value=val;if(ph)i.placeholder=tr(ph);return i}
@@ -2269,11 +2454,13 @@ function wsTasks(B){B.append(el('p','wsnote',tr('Choisis le modèle et les outil
     if(t.collection!=null&&!WS.knowledge.some(c=>c.id===t.collection))collection.add(new Option(tr('Collection indisponible'),String(t.collection)));
     collection.value=t.collection==null?'':String(t.collection);
     const wc=inp('checkbox'),wl=el('label','ck');wc.checked=t.web??!!t.id;wl.append(wc,document.createTextNode(tr('Accès au web (recherche, lecture de liens)')));
-    collection.onchange=()=>{wc.disabled=!!collection.value};collection.onchange();
-    f.append(field('Titre',ti),field('Prompt',pr),field('Modèle',model),field('Synthèse à valider',collection),wl,r,en);
+    const recipe=recipeFields(collection,t,pr,model);
+    collection.onchange=()=>{wc.disabled=!!collection.value;recipe.update()};collection.onchange();
+    f.append(field('Titre',ti),field('Prompt',pr),field('Modèle',model),field('Collection',collection),recipe.form,wl,r,en);
     const acts=el('div','acts'),c=el('button','wsbtn',tr('Annuler')),s=el('button','wsbtn',tr('Enregistrer'));acts.append(c,s);f.append(acts);c.onclick=()=>f.remove();
     s.onclick=async()=>{const v=ty.value,when=v==='daily'?{type:v,time:tm.value}:v==='weekly'?{type:v,day:+dy.value,time:tm.value}:v==='interval'?{type:v,minutes:+mn.value}:{type:v,at:new Date(at.value).getTime()/1000};
-      await wsSave({what:'schedule',item:{id:t.id,title:ti.value,prompt:pr.value,when,enabled:ec.checked,model:model.value||null,web:!wc.disabled&&wc.checked,collection:collection.value?Number(collection.value):null}});renderWs()};B.append(f);ti.focus()}}
+      const versions=recipe.selected();if(!versions)return;
+      await wsSave({what:'schedule',item:{id:t.id,title:ti.value,prompt:versions.length?recipe.title:pr.value.trim(),when,enabled:ec.checked,model:model.disabled?null:model.value||null,web:!wc.disabled&&wc.checked,collection:collection.value?Number(collection.value):null,compare_documents:versions}});renderWs()};B.append(f);ti.focus()}}
 function wsApi(B){const a=WS.api;
   B.append(el('p','wsnote',tr('Une API compatible OpenAI pour utiliser le modèle actif de Sparky depuis d’autres applications (Continue, extensions VS Code, scripts…). Elle n’écoute que sur ce PC.')));
   const f=el('div','wsf');const on=el('label','ck');const oc=inp('checkbox');oc.checked=a.enabled;on.append(oc,document.createTextNode(tr('Activer l’API locale')));
@@ -2428,5 +2615,6 @@ onEvent=function(e,live){
     if(live)showTyping('réfléchit…');down();return}
   _onEvent1(e,live)};
 </script>
+<script src="/ui/workbenches.js"></script>
 </body>
 </html>
